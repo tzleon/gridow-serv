@@ -1,0 +1,1426 @@
+openapi: 3.0.3
+
+info:
+  title: Gridow API
+  description: 格物（Gridow）物品管理后台服务接口文档，本地数据作为缓存，后台服务作为数据提供者。
+  version: 1.0.0
+  contact:
+    name: Gridow Team
+
+servers:
+  - url: https://api.gridow.com/v1
+    description: 生产环境
+  - url: http://localhost:8080/v1
+    description: 开发环境
+
+tags:
+  - name: 用户
+    description: 用户注册、登录、会员升级
+  - name: 物品
+    description: 物品增删改查
+  - name: 空间
+    description: 空间增删改查与树结构
+  - name: 操作历史
+    description: 入库/出库/转移操作记录
+  - name: 图片
+    description: 图片上传与访问
+  - name: 数据同步
+    description: 离线缓存与增量同步
+
+paths:
+  /users/register:
+    post:
+      tags: [用户]
+      summary: 用户注册
+      description: 创建新用户账户
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, email, password]
+              properties:
+                username:
+                  type: string
+                  description: 用户名
+                  example: 张三
+                email:
+                  type: string
+                  format: email
+                  description: 邮箱地址
+                  example: zhangsan@example.com
+                password:
+                  type: string
+                  description: 密码（至少6位）
+                  example: password123
+                avatar:
+                  type: string
+                  description: 头像URL
+                  example: https://example.com/avatar.jpg
+      responses:
+        "201":
+          description: 注册成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /users/login:
+    post:
+      tags: [用户]
+      summary: 用户登录
+      description: 使用邮箱和密码登录
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  description: 邮箱地址
+                  example: zhangsan@example.com
+                password:
+                  type: string
+                  description: 密码
+                  example: password123
+      responses:
+        "200":
+          description: 登录成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: "#/components/schemas/UserInfo"
+                  token:
+                    type: string
+                    description: JWT token
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/logout:
+    post:
+      tags: [用户]
+      summary: 用户登出
+      description: 清除登录状态
+      responses:
+        "204":
+          description: 登出成功
+
+  /users/{userId}:
+    get:
+      tags: [用户]
+      summary: 获取用户信息
+      description: 根据用户ID获取用户详情
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: 用户ID
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [用户]
+      summary: 更新用户信息
+      description: 更新用户名或头像
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: 用户ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                username:
+                  type: string
+                  description: 用户名
+                avatar:
+                  type: string
+                  description: 头像URL
+      responses:
+        "200":
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserInfo"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /users/{userId}/upgrade:
+    post:
+      tags: [用户]
+      summary: 升级会员
+      description: 将普通用户升级为VIP会员
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: 用户ID
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan:
+                  type: string
+                  description: 会员计划
+                  enum: [vip, vip_plus]
+                  example: vip
+      responses:
+        "200":
+          description: 升级成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  new_role:
+                    type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /items:
+    get:
+      tags: [物品]
+      summary: 获取物品列表
+      description: 支持按分类筛选、关键词搜索、分页
+      parameters:
+        - name: category
+          in: query
+          description: 物品分类（daily/food/tool/medicine/clothes/electronics）
+          schema:
+            type: string
+            enum: [daily, food, tool, medicine, clothes, electronics]
+        - name: keyword
+          in: query
+          description: 搜索关键词（匹配名称、标签、位置）
+          schema:
+            type: string
+        - name: spaceId
+          in: query
+          description: 按空间ID筛选
+          schema:
+            type: string
+        - name: page
+          in: query
+          description: 页码（从1开始）
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          description: 每页数量
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: sortBy
+          in: query
+          description: 排序字段
+          schema:
+            type: string
+            enum: [updatedAt, createdAt, name, qty, expiry]
+            default: updatedAt
+        - name: sortOrder
+          in: query
+          description: 排序方向
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Item"
+                  total:
+                    type: integer
+                    description: 总数量
+                  page:
+                    type: integer
+                  pageSize:
+                    type: integer
+
+    post:
+      tags: [物品]
+      summary: 创建物品（入库）
+      description: 入库新物品，同时创建入库历史记录，更新空间计数
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemCreateRequest"
+      responses:
+        "201":
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /items/expiring:
+    get:
+      tags: [物品]
+      summary: 获取临期物品列表
+      description: 返回有保质期且即将过期的物品，按过期时间升序排列
+      parameters:
+        - name: days
+          in: query
+          description: 未来多少天内到期
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Item"
+
+  /items/low-stock:
+    get:
+      tags: [物品]
+      summary: 获取低库存物品列表
+      description: 返回库存量≤阈值的物品，按库存量升序排列
+      parameters:
+        - name: threshold
+          in: query
+          description: 低库存阈值
+          schema:
+            type: integer
+            default: 1
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Item"
+
+  /items/{itemId}:
+    get:
+      tags: [物品]
+      summary: 获取物品详情
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [物品]
+      summary: 更新物品
+      description: 编辑物品信息，若位置变更则自动更新空间关联和计数
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemUpdateRequest"
+      responses:
+        "200":
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [物品]
+      summary: 删除物品
+      description: 删除物品，同时删除空间关联和历史记录，更新空间计数
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      responses:
+        "204":
+          description: 删除成功
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /items/{itemId}/outbound:
+    post:
+      tags: [物品]
+      summary: 出库物品
+      description: 减少物品库存数量，创建出库历史记录，更新空间计数
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OutboundRequest"
+      responses:
+        "200":
+          description: 出库成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /items/{itemId}/transfer:
+    post:
+      tags: [物品]
+      summary: 转移物品
+      description: 将物品从一个空间转移到另一个空间，更新空间关联和计数，创建转移历史记录
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferRequest"
+      responses:
+        "200":
+          description: 转移成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /items/barcode/{barcode}:
+    get:
+      tags: [物品]
+      summary: 按条码查询物品
+      parameters:
+        - name: barcode
+          in: path
+          required: true
+          description: 条码/二维码内容
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Item"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /spaces:
+    get:
+      tags: [空间]
+      summary: 获取空间列表
+      parameters:
+        - name: parentId
+          in: query
+          description: 父空间ID，不传则返回顶级空间
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Space"
+
+    post:
+      tags: [空间]
+      summary: 创建空间
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpaceCreateRequest"
+      responses:
+        "201":
+          description: 创建成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Space"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /spaces/tree:
+    get:
+      tags: [空间]
+      summary: 获取空间树
+      description: 返回完整的空间树形结构，包含每个节点的子空间和物品ID列表
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SpaceNode"
+
+  /spaces/{spaceId}:
+    get:
+      tags: [空间]
+      summary: 获取空间详情
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Space"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    put:
+      tags: [空间]
+      summary: 更新空间
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpaceUpdateRequest"
+      responses:
+        "200":
+          description: 更新成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Space"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    delete:
+      tags: [空间]
+      summary: 删除空间
+      description: 递归删除空间及其所有子空间，解除关联物品的位置绑定
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "204":
+          description: 删除成功
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /spaces/{spaceId}/children:
+    get:
+      tags: [空间]
+      summary: 获取子空间列表
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Space"
+
+  /spaces/{spaceId}/items:
+    get:
+      tags: [空间]
+      summary: 获取空间下的物品列表
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Item"
+
+  /spaces/{spaceId}/path:
+    get:
+      tags: [空间]
+      summary: 获取空间路径
+      description: 返回从根空间到当前空间的完整路径
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  path:
+                    type: string
+                    description: 空间路径，如 "🏠 客厅 > 🗄️ 电视柜"
+                  segments:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string
+                        icon:
+                          type: string
+
+  /history:
+    get:
+      tags: [操作历史]
+      summary: 获取操作历史列表
+      parameters:
+        - name: type
+          in: query
+          description: 操作类型（in/out/move）
+          schema:
+            type: string
+            enum: [in, out, move]
+        - name: limit
+          in: query
+          description: 返回数量限制
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: before
+          in: query
+          description: 分页游标，返回此时间之前的记录
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryRecord"
+
+  /history/item/{itemId}:
+    get:
+      tags: [操作历史]
+      summary: 获取物品的操作历史
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/HistoryRecord"
+
+  /images/upload:
+    post:
+      tags: [图片]
+      summary: 上传图片
+      description: 上传图片文件，返回图片ID和访问URL。客户端先上传图片获取URL，再将URL存入物品/空间的photoUri字段
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 图片文件（支持 JPG/PNG/WEBP，最大 10MB）
+                type:
+                  type: string
+                  description: 图片用途（space/item）
+                  enum: [space, item]
+      responses:
+        "201":
+          description: 上传成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: 图片ID
+                  url:
+                    type: string
+                    description: 图片访问URL
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "413":
+          description: 文件过大
+
+  /images/{imageId}:
+    get:
+      tags: [图片]
+      summary: 获取图片
+      parameters:
+        - name: imageId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 图片文件
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /sync/pull:
+    get:
+      tags: [数据同步]
+      summary: 增量拉取数据
+      description: 根据上次同步时间，拉取服务端变更的物品、空间、历史记录数据
+      parameters:
+        - name: lastSyncTime
+          in: query
+          required: true
+          description: 上次同步时间（ISO 8601格式）
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SyncPullResponse"
+
+  /sync/push:
+    post:
+      tags: [数据同步]
+      summary: 增量推送数据
+      description: 将离线期间本地的变更批量推送到服务端
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SyncPushRequest"
+      responses:
+        "200":
+          description: 推送成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  conflicts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SyncConflict"
+                  serverTime:
+                    type: string
+                    format: date-time
+
+  /sync/status:
+    get:
+      tags: [数据同步]
+      summary: 获取同步状态
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  lastSyncTime:
+                    type: string
+                    format: date-time
+                    nullable: true
+                  pendingChanges:
+                    type: integer
+                    description: 待推送的本地变更数量
+                  serverTime:
+                    type: string
+                    format: date-time
+
+components:
+  parameters:
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      description: 物品ID
+      schema:
+        type: string
+        format: uuid
+
+    SpaceId:
+      name: spaceId
+      in: path
+      required: true
+      description: 空间ID
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: 请求参数错误
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 错误码
+        message:
+          type: string
+          description: 错误信息
+
+    User:
+      type: object
+      required: [id, username, email, role, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 用户ID
+        username:
+          type: string
+          description: 用户名
+          example: 张三
+        email:
+          type: string
+          format: email
+          description: 邮箱地址
+          example: zhangsan@example.com
+        avatar:
+          type: string
+          description: 头像URL
+          default: ""
+        role:
+          type: string
+          description: 用户角色
+          enum: [user, vip, vip_plus, admin]
+          default: user
+        status:
+          type: string
+          description: 用户状态
+          enum: [active, inactive, banned]
+          default: active
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间
+        updatedAt:
+          type: string
+          format: date-time
+          description: 更新时间
+
+    UserInfo:
+      type: object
+      required: [id, username, email, role, status, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 用户ID
+        username:
+          type: string
+          description: 用户名
+          example: 张三
+        email:
+          type: string
+          format: email
+          description: 邮箱地址
+          example: zhangsan@example.com
+        avatar:
+          type: string
+          description: 头像URL
+        role:
+          type: string
+          description: 用户角色
+          enum: [user, vip, vip_plus, admin]
+        status:
+          type: string
+          description: 用户状态
+          enum: [active, inactive, banned]
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间
+
+    Item:
+      type: object
+      required: [id, name, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 物品ID
+        name:
+          type: string
+          description: 物品名称
+          example: 洗衣液
+        icon:
+          type: string
+          description: 物品图标（Emoji）
+          default: "📦"
+          example: "🧴"
+        qty:
+          type: integer
+          description: 库存数量
+          default: 0
+          example: 3
+        location:
+          type: string
+          description: 所在位置名称
+          example: "🏠 客厅 > 🗄️ 电视柜"
+        locationId:
+          type: string
+          format: uuid
+          description: 所在空间ID
+          nullable: true
+        category:
+          type: string
+          description: 物品分类
+          enum: [daily, food, tool, medicine, clothes, electronics]
+          default: daily
+          example: daily
+        tags:
+          type: string
+          description: 标签（JSON数组字符串）
+          default: "[]"
+          example: '["清洁","日用品"]'
+        barcode:
+          type: string
+          description: 条码/二维码内容
+          default: ""
+          example: "6901234567890"
+        photos:
+          type: string
+          description: 照片URL列表（JSON数组字符串）
+          default: "[]"
+          example: '["https://api.gridow.com/v1/images/abc123"]'
+        photoUri:
+          type: string
+          description: 主图URL
+          default: ""
+          example: "https://api.gridow.com/v1/images/abc123"
+        buyDate:
+          type: string
+          description: 购买日期
+          default: ""
+          example: "2025-01-15"
+        expiry:
+          type: string
+          description: 过期日期，"-"表示无过期
+          default: "-"
+          example: "2026-01-15"
+        remark:
+          type: string
+          description: 备注
+          default: ""
+        createdAt:
+          type: string
+          format: date-time
+          description: 创建时间
+        updatedAt:
+          type: string
+          format: date-time
+          description: 更新时间
+
+    ItemCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: 物品名称
+        icon:
+          type: string
+          default: "📦"
+        qty:
+          type: integer
+          minimum: 0
+          default: 1
+        locationId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 所在空间ID
+        category:
+          type: string
+          enum: [daily, food, tool, medicine, clothes, electronics]
+          default: daily
+        tags:
+          type: array
+          items:
+            type: string
+          default: []
+          description: 标签列表
+        barcode:
+          type: string
+          default: ""
+        photoUri:
+          type: string
+          default: ""
+          description: 主图URL（需先通过图片上传接口获取）
+        buyDate:
+          type: string
+          default: ""
+        expiry:
+          type: string
+          default: "-"
+        remark:
+          type: string
+          default: ""
+
+    ItemUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        icon:
+          type: string
+        qty:
+          type: integer
+          minimum: 0
+        locationId:
+          type: string
+          format: uuid
+          nullable: true
+        category:
+          type: string
+          enum: [daily, food, tool, medicine, clothes, electronics]
+        tags:
+          type: array
+          items:
+            type: string
+        barcode:
+          type: string
+        photoUri:
+          type: string
+        buyDate:
+          type: string
+        expiry:
+          type: string
+        remark:
+          type: string
+
+    OutboundRequest:
+      type: object
+      required: [qty]
+      properties:
+        qty:
+          type: integer
+          minimum: 1
+          description: 出库数量
+        reason:
+          type: string
+          default: ""
+          description: 出库原因
+
+    TransferRequest:
+      type: object
+      required: [targetSpaceId]
+      properties:
+        targetSpaceId:
+          type: string
+          format: uuid
+          description: 目标空间ID
+        qty:
+          type: integer
+          minimum: 1
+          default: 1
+          description: 转移数量
+
+    Space:
+      type: object
+      required: [id, name, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: 客厅
+        icon:
+          type: string
+          default: "🏠"
+          example: "🏠"
+        count:
+          type: integer
+          description: 空间下物品数量（含子空间）
+          default: 0
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 父空间ID，顶级空间为null
+        depth:
+          type: integer
+          description: 空间深度（顶级为0）
+          default: 0
+        sortOrder:
+          type: integer
+          default: 0
+        photoUri:
+          type: string
+          default: ""
+          description: 空间图片URL
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    SpaceCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: 空间名称
+        icon:
+          type: string
+          default: "🏠"
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+          description: 父空间ID，不传或为null则创建顶级空间
+        photoUri:
+          type: string
+          default: ""
+          description: 空间图片URL（需先通过图片上传接口获取）
+
+    SpaceUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        icon:
+          type: string
+        photoUri:
+          type: string
+        sortOrder:
+          type: integer
+
+    SpaceNode:
+      type: object
+      description: 空间树节点
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        icon:
+          type: string
+        count:
+          type: integer
+        parentId:
+          type: string
+          format: uuid
+          nullable: true
+        depth:
+          type: integer
+        photoUri:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpaceNode"
+        itemIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: 该空间直接关联的物品ID列表
+
+    HistoryRecord:
+      type: object
+      required: [id, type, itemId, itemName, qty, time]
+      properties:
+        id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          description: 操作类型
+          enum: [in, out, move]
+          example: in
+        itemId:
+          type: string
+          format: uuid
+          description: 物品ID
+        itemName:
+          type: string
+          description: 物品名称
+          example: 洗衣液
+        qty:
+          type: integer
+          description: 操作数量
+          example: 2
+        fromLocation:
+          type: string
+          description: 来源位置（出库/转移时有值）
+          example: "🏠 客厅"
+        toLocation:
+          type: string
+          description: 目标位置（入库/转移时有值）
+          example: "🏠 卧室 > 🗄️ 衣柜"
+        reason:
+          type: string
+          description: 原因（出库时有值）
+        remark:
+          type: string
+          description: 备注
+        time:
+          type: string
+          description: 操作时间
+          example: "2025-05-06 14:30"
+
+    SyncPullResponse:
+      type: object
+      properties:
+        items:
+          type: object
+          description: 变更的物品数据
+          properties:
+            created:
+              type: array
+              items:
+                $ref: "#/components/schemas/Item"
+            updated:
+              type: array
+              items:
+                $ref: "#/components/schemas/Item"
+            deleted:
+              type: array
+              items:
+                type: string
+                format: uuid
+                description: 被删除的物品ID列表
+        spaces:
+          type: object
+          description: 变更的空间数据
+          properties:
+            created:
+              type: array
+              items:
+                $ref: "#/components/schemas/Space"
+            updated:
+              type: array
+              items:
+                $ref: "#/components/schemas/Space"
+            deleted:
+              type: array
+              items:
+                type: string
+                format: uuid
+        history:
+          type: object
+          description: 变更的历史数据
+          properties:
+            created:
+              type: array
+              items:
+                $ref: "#/components/schemas/HistoryRecord"
+            deleted:
+              type: array
+              items:
+                type: string
+                format: uuid
+        serverTime:
+          type: string
+          format: date-time
+          description: 服务器当前时间，客户端应保存为新的同步时间戳
+        hasMore:
+          type: boolean
+          description: 是否还有更多数据需要拉取
+
+    SyncPushRequest:
+      type: object
+      properties:
+        items:
+          type: object
+          properties:
+            created:
+              type: array
+              items:
+                $ref: "#/components/schemas/Item"
+            updated:
+              type: array
+              items:
+                $ref: "#/components/schemas/Item"
+            deleted:
+              type: array
+              items:
+                type: string
+                format: uuid
+        spaces:
+          type: object
+          properties:
+            created:
+              type: array
+              items:
+                $ref: "#/components/schemas/Space"
+            updated:
+              type: array
+              items:
+                $ref: "#/components/schemas/Space"
+            deleted:
+              type: array
+              items:
+                type: string
+                format: uuid
+        history:
+          type: object
+          properties:
+            created:
+              type: array
+              items:
+                $ref: "#/components/schemas/HistoryRecord"
+            deleted:
+              type: array
+              items:
+                type: string
+                format: uuid
+        clientTime:
+          type: string
+          format: date-time
+          description: 客户端当前时间
+
+    SyncConflict:
+      type: object
+      description: 同步冲突详情
+      properties:
+        entity:
+          type: string
+          description: 冲突实体类型
+          enum: [item, space]
+        id:
+          type: string
+          format: uuid
+          description: 冲突实体ID
+        reason:
+          type: string
+          description: 冲突原因
+          enum: [version_mismatch, deleted_remotely, modified_remotely]
+        clientVersion:
+          description: 客户端版本数据
+          oneOf:
+            - $ref: "#/components/schemas/Item"
+            - $ref: "#/components/schemas/Space"
+        serverVersion:
+          description: 服务端版本数据
+          oneOf:
+            - $ref: "#/components/schemas/Item"
+            - $ref: "#/components/schemas/Space"
