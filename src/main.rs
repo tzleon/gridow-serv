@@ -1,4 +1,5 @@
 mod handlers;
+mod logging;
 mod models;
 mod routes;
 mod state;
@@ -10,15 +11,12 @@ use tower_http::trace::TraceLayer;
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gridow_web=debug,tower_http=debug".into()),
-        )
-        .init();
+    let log_dir = std::env::var("LOG_DIR")
+        .unwrap_or_else(|_| "./logs".to_string());
+    
+    logging::init_logging(&log_dir);
 
     let database_url = std::env::var("DATABASE_URL")
-        // .unwrap_or_else(|_| "postgresql://postgres:dfER%401122@127.0.0.1:54321/gridow-web".to_string());
         .unwrap_or_else(|_| "postgresql://postgres:dfER%40123123@156.238.229.131:54328/gridow-web".to_string());
 
     let upload_dir = std::env::var("UPLOAD_DIR")
