@@ -16,14 +16,14 @@ pub async fn sync_pull(
     let last_sync_time = params.last_sync_time.unwrap_or_default();
 
     let created_items: Vec<Item> =
-        sqlx::query_as("SELECT * FROM items WHERE created_at > ?")
+        sqlx::query_as("SELECT * FROM items WHERE created_at > $1")
             .bind(&last_sync_time)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?;
 
     let updated_items: Vec<Item> =
-        sqlx::query_as("SELECT * FROM items WHERE updated_at > ? AND created_at <= ?")
+        sqlx::query_as("SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2")
             .bind(&last_sync_time)
             .bind(&last_sync_time)
             .fetch_all(&state.db)
@@ -31,14 +31,14 @@ pub async fn sync_pull(
             .map_err(AppError::Database)?;
 
     let created_spaces: Vec<Space> =
-        sqlx::query_as("SELECT * FROM spaces WHERE created_at > ?")
+        sqlx::query_as("SELECT * FROM spaces WHERE created_at > $1")
             .bind(&last_sync_time)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?;
 
     let updated_spaces: Vec<Space> =
-        sqlx::query_as("SELECT * FROM spaces WHERE updated_at > ? AND created_at <= ?")
+        sqlx::query_as("SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2")
             .bind(&last_sync_time)
             .bind(&last_sync_time)
             .fetch_all(&state.db)
@@ -46,7 +46,7 @@ pub async fn sync_pull(
             .map_err(AppError::Database)?;
 
     let created_history: Vec<HistoryRecord> =
-        sqlx::query_as("SELECT * FROM history WHERE time > ?")
+        sqlx::query_as("SELECT * FROM history WHERE time > $1")
             .bind(&last_sync_time)
             .fetch_all(&state.db)
             .await
@@ -85,7 +85,7 @@ pub async fn sync_push(
 
     if let Some(items) = req.items {
         for item in items.created {
-            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE id = ?")
+            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE id = $1")
                 .bind(&item.id)
                 .fetch_one(&state.db)
                 .await
@@ -101,7 +101,7 @@ pub async fn sync_push(
             } else {
                 sqlx::query(
                     r#"INSERT INTO items (id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
                 )
                 .bind(&item.id)
                 .bind(&item.name)
@@ -127,8 +127,8 @@ pub async fn sync_push(
 
         for item in items.updated {
             sqlx::query(
-                r#"UPDATE items SET name=?, icon=?, qty=?, location=?, location_id=?, category=?, tags=?, barcode=?, photos=?, photo_uri=?, buy_date=?, expiry=?, remark=?, updated_at=?
-                   WHERE id=?"#,
+                r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photos=$9, photo_uri=$10, buy_date=$11, expiry=$12, remark=$13, updated_at=$14
+                   WHERE id=$15"#,
             )
             .bind(&item.name)
             .bind(&item.icon)
@@ -151,7 +151,7 @@ pub async fn sync_push(
         }
 
         for id in items.deleted {
-            sqlx::query("DELETE FROM items WHERE id = ?")
+            sqlx::query("DELETE FROM items WHERE id = $1")
                 .bind(&id)
                 .execute(&state.db)
                 .await
@@ -161,7 +161,7 @@ pub async fn sync_push(
 
     if let Some(spaces) = req.spaces {
         for space in spaces.created {
-            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM spaces WHERE id = ?")
+            let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM spaces WHERE id = $1")
                 .bind(&space.id)
                 .fetch_one(&state.db)
                 .await
@@ -177,7 +177,7 @@ pub async fn sync_push(
             } else {
                 sqlx::query(
                     r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, created_at, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
                 )
                 .bind(&space.id)
                 .bind(&space.name)
@@ -197,7 +197,7 @@ pub async fn sync_push(
 
         for space in spaces.updated {
             sqlx::query(
-                "UPDATE spaces SET name=?, icon=?, count=?, parent_id=?, depth=?, sort_order=?, photo_uri=?, updated_at=? WHERE id=?",
+                "UPDATE spaces SET name=$1, icon=$2, count=$3, parent_id=$4, depth=$5, sort_order=$6, photo_uri=$7, updated_at=$8 WHERE id=$9",
             )
             .bind(&space.name)
             .bind(&space.icon)
@@ -214,7 +214,7 @@ pub async fn sync_push(
         }
 
         for id in spaces.deleted {
-            sqlx::query("DELETE FROM spaces WHERE id = ?")
+            sqlx::query("DELETE FROM spaces WHERE id = $1")
                 .bind(&id)
                 .execute(&state.db)
                 .await
@@ -226,7 +226,7 @@ pub async fn sync_push(
         for record in history.created {
             sqlx::query(
                 r#"INSERT INTO history (id, type, item_id, item_name, qty, from_location, to_location, reason, remark, time)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
             )
             .bind(&record.id)
             .bind(&record.r#type)
@@ -244,7 +244,7 @@ pub async fn sync_push(
         }
 
         for id in history.deleted {
-            sqlx::query("DELETE FROM history WHERE id = ?")
+            sqlx::query("DELETE FROM history WHERE id = $1")
                 .bind(&id)
                 .execute(&state.db)
                 .await
@@ -257,7 +257,7 @@ pub async fn sync_push(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    sqlx::query("UPDATE sync_status SET last_sync_time=?, pending_changes=0 WHERE id=1")
+    sqlx::query("UPDATE sync_status SET last_sync_time=$1, pending_changes=0 WHERE id=1")
         .bind(&server_time)
         .execute(&state.db)
         .await

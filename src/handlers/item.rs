@@ -101,7 +101,7 @@ pub async fn create_item(
 
     sqlx::query(
         r#"INSERT INTO items (id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
     )
     .bind(&id)
     .bind(&req.name)
@@ -123,7 +123,7 @@ pub async fn create_item(
     .await
     .map_err(AppError::Database)?;
 
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&id)
         .fetch_one(&state.db)
         .await
@@ -153,7 +153,7 @@ pub async fn get_item(
     State(state): State<AppState>,
     Path(item_id): Path<String>,
 ) -> Result<Json<Item>, AppError> {
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_optional(&state.db)
         .await
@@ -168,7 +168,7 @@ pub async fn update_item(
     Path(item_id): Path<String>,
     Json(req): Json<ItemUpdateRequest>,
 ) -> Result<Json<Item>, AppError> {
-    let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_optional(&state.db)
         .await
@@ -205,8 +205,8 @@ pub async fn update_item(
     let now = now_string();
 
     sqlx::query(
-        r#"UPDATE items SET name=?, icon=?, qty=?, location=?, location_id=?, category=?, tags=?, barcode=?, photo_uri=?, buy_date=?, expiry=?, remark=?, updated_at=?
-           WHERE id=?"#,
+        r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photo_uri=$9, buy_date=$10, expiry=$11, remark=$12, updated_at=$13
+           WHERE id=$14"#,
     )
     .bind(&name)
     .bind(&icon)
@@ -226,7 +226,7 @@ pub async fn update_item(
     .await
     .map_err(AppError::Database)?;
 
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_one(&state.db)
         .await
@@ -248,20 +248,20 @@ pub async fn delete_item(
     State(state): State<AppState>,
     Path(item_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
-    sqlx::query("DELETE FROM items WHERE id = ?")
+    sqlx::query("DELETE FROM items WHERE id = $1")
         .bind(&item_id)
         .execute(&state.db)
         .await
         .map_err(AppError::Database)?;
 
-    sqlx::query("DELETE FROM history WHERE item_id = ?")
+    sqlx::query("DELETE FROM history WHERE item_id = $1")
         .bind(&item_id)
         .execute(&state.db)
         .await
@@ -283,7 +283,7 @@ pub async fn outbound_item(
         return Err(AppError::BadRequest("出库数量必须大于0".to_string()));
     }
 
-    let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_optional(&state.db)
         .await
@@ -300,7 +300,7 @@ pub async fn outbound_item(
     let new_qty = existing.qty - req.qty;
     let now = now_string();
 
-    sqlx::query("UPDATE items SET qty=?, updated_at=? WHERE id=?")
+    sqlx::query("UPDATE items SET qty=$1, updated_at=$2 WHERE id=$3")
         .bind(new_qty)
         .bind(&now)
         .bind(&item_id)
@@ -308,7 +308,7 @@ pub async fn outbound_item(
         .await
         .map_err(AppError::Database)?;
 
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_one(&state.db)
         .await
@@ -343,7 +343,7 @@ pub async fn transfer_item(
         return Err(AppError::BadRequest("转移数量必须大于0".to_string()));
     }
 
-    let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_optional(&state.db)
         .await
@@ -351,7 +351,7 @@ pub async fn transfer_item(
         .ok_or(AppError::NotFound)?;
 
     let _target_space = sqlx::query_as::<_, crate::models::space::Space>(
-        "SELECT * FROM spaces WHERE id = ?",
+        "SELECT * FROM spaces WHERE id = $1",
     )
     .bind(&req.target_space_id)
     .fetch_optional(&state.db)
@@ -365,7 +365,7 @@ pub async fn transfer_item(
     let to_location = get_space_path_string(&state, &req.target_space_id).await?;
     let now = now_string();
 
-    sqlx::query("UPDATE items SET location=?, location_id=?, updated_at=? WHERE id=?")
+    sqlx::query("UPDATE items SET location=$1, location_id=$2, updated_at=$3 WHERE id=$4")
         .bind(&to_location)
         .bind(&req.target_space_id)
         .bind(&now)
@@ -374,7 +374,7 @@ pub async fn transfer_item(
         .await
         .map_err(AppError::Database)?;
 
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
         .bind(&item_id)
         .fetch_one(&state.db)
         .await
@@ -405,7 +405,7 @@ pub async fn get_item_by_barcode(
     State(state): State<AppState>,
     Path(barcode): Path<String>,
 ) -> Result<Json<Item>, AppError> {
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE barcode = ?")
+    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE barcode = $1")
         .bind(&barcode)
         .fetch_optional(&state.db)
         .await
@@ -427,7 +427,7 @@ pub async fn get_expiring_items(
 
     let items = sqlx::query_as::<_, Item>(
         r#"SELECT * FROM items
-           WHERE expiry != '-' AND expiry != '' AND expiry <= ?
+           WHERE expiry != '-' AND expiry != '' AND expiry <= $1
            ORDER BY expiry ASC"#,
     )
     .bind(&target_date)
@@ -445,7 +445,7 @@ pub async fn get_low_stock_items(
     let threshold = params.threshold.unwrap_or(1);
 
     let items = sqlx::query_as::<_, Item>(
-        "SELECT * FROM items WHERE qty <= ? ORDER BY qty ASC",
+        "SELECT * FROM items WHERE qty <= $1 ORDER BY qty ASC",
     )
     .bind(threshold)
     .fetch_all(&state.db)
@@ -475,13 +475,13 @@ async fn get_space_path_string(state: &AppState, space_id: &str) -> Result<Strin
 }
 
 async fn update_space_count(state: &AppState, space_id: &str) -> Result<(), AppError> {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE location_id = ?")
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE location_id = $1")
         .bind(space_id)
         .fetch_one(&state.db)
         .await
         .map_err(AppError::Database)?;
 
-    sqlx::query("UPDATE spaces SET count=? WHERE id=?")
+    sqlx::query("UPDATE spaces SET count=$1 WHERE id=$2")
         .bind(count.0 as i32)
         .bind(space_id)
         .execute(&state.db)
@@ -507,7 +507,7 @@ async fn create_history_record(
 
     sqlx::query(
         r#"INSERT INTO history (id, type, item_id, item_name, qty, from_location, to_location, reason, remark, time)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
     )
     .bind(&id)
     .bind(history_type)

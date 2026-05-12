@@ -14,7 +14,7 @@ pub async fn list_spaces(
     Query(params): Query<SpaceListParams>,
 ) -> Result<Json<Vec<Space>>, AppError> {
     let spaces = if let Some(ref parent_id) = params.parent_id {
-        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = ? ORDER BY sort_order, name")
+        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
             .bind(parent_id)
             .fetch_all(&state.db)
             .await
@@ -40,7 +40,7 @@ pub async fn create_space(
         .to_string();
 
     let (depth, parent_id) = if let Some(ref pid) = req.parent_id {
-        let parent: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = ?")
+        let parent: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
             .bind(pid)
             .fetch_optional(&state.db)
             .await
@@ -53,7 +53,7 @@ pub async fn create_space(
 
     let space = sqlx::query_as::<_, Space>(
         r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, created_at, updated_at)
-           VALUES (?, ?, ?, 0, ?, ?, 0, ?, ?, ?)
+           VALUES ($1, $2, $3, 0, $4, $5, 0, $6, $7, $8)
            RETURNING *"#,
     )
     .bind(&id)
@@ -75,7 +75,7 @@ pub async fn get_space(
     State(state): State<AppState>,
     Path(space_id): Path<String>,
 ) -> Result<Json<Space>, AppError> {
-    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = ?")
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
@@ -90,7 +90,7 @@ pub async fn update_space(
     Path(space_id): Path<String>,
     Json(req): Json<SpaceUpdateRequest>,
 ) -> Result<Json<Space>, AppError> {
-    let existing = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = ?")
+    let existing = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
@@ -107,7 +107,7 @@ pub async fn update_space(
         .to_string();
 
     let space = sqlx::query_as::<_, Space>(
-        "UPDATE spaces SET name=?, icon=?, photo_uri=?, sort_order=?, updated_at=? WHERE id=? RETURNING *",
+        "UPDATE spaces SET name=$1, icon=$2, photo_uri=$3, sort_order=$4, updated_at=$5 WHERE id=$6 RETURNING *",
     )
     .bind(&name)
     .bind(&icon)
@@ -126,7 +126,7 @@ pub async fn delete_space(
     State(state): State<AppState>,
     Path(space_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = ?")
+    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
@@ -143,7 +143,7 @@ async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), 
 
     while let Some(current_id) = stack.pop() {
         let children: Vec<Space> =
-            sqlx::query_as("SELECT * FROM spaces WHERE parent_id = ?")
+            sqlx::query_as("SELECT * FROM spaces WHERE parent_id = $1")
                 .bind(&current_id)
                 .fetch_all(&state.db)
                 .await
@@ -153,13 +153,13 @@ async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), 
             stack.push(child.id);
         }
 
-        sqlx::query("UPDATE items SET location_id=NULL, location='' WHERE location_id = ?")
+        sqlx::query("UPDATE items SET location_id=NULL, location='' WHERE location_id = $1")
             .bind(&current_id)
             .execute(&state.db)
             .await
             .map_err(AppError::Database)?;
 
-        sqlx::query("DELETE FROM spaces WHERE id = ?")
+        sqlx::query("DELETE FROM spaces WHERE id = $1")
             .bind(&current_id)
             .execute(&state.db)
             .await
@@ -236,7 +236,7 @@ pub async fn get_space_children(
     State(state): State<AppState>,
     Path(space_id): Path<String>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = ?")
+    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
@@ -244,7 +244,7 @@ pub async fn get_space_children(
         .ok_or(AppError::NotFound)?;
 
     let children =
-        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = ? ORDER BY sort_order, name")
+        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
             .bind(&space_id)
             .fetch_all(&state.db)
             .await
@@ -257,14 +257,14 @@ pub async fn get_space_items(
     State(state): State<AppState>,
     Path(space_id): Path<String>,
 ) -> Result<Json<Vec<Item>>, AppError> {
-    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = ?")
+    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
-    let items = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE location_id = ?")
+    let items = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE location_id = $1")
         .bind(&space_id)
         .fetch_all(&state.db)
         .await
@@ -296,7 +296,7 @@ pub async fn get_space_path_segments(
     let mut current_id = Some(space_id.to_string());
 
     while let Some(id) = current_id {
-        let space: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = ?")
+        let space: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
             .bind(&id)
             .fetch_optional(pool)
             .await

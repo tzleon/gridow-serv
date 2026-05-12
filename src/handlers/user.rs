@@ -17,7 +17,7 @@ pub async fn register_user(
     State(state): State<AppState>,
     Json(req): Json<UserRegisterRequest>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
-    let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE email = ?")
+    let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_one(&state.db)
         .await
@@ -35,7 +35,7 @@ pub async fn register_user(
 
     sqlx::query(
         r#"INSERT INTO users (id, username, email, password_hash, avatar, role, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'user', 'active', ?, ?)"#,
+           VALUES ($1, $2, $3, $4, $5, 'user', 'active', $6, $7)"#,
     )
     .bind(&user_id)
     .bind(&req.username)
@@ -65,7 +65,7 @@ pub async fn login_user(
     State(state): State<AppState>,
     Json(req): Json<UserLoginRequest>,
 ) -> Result<AxumJson<UserLoginResponse>, AppError> {
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE email = ?")
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_optional(&state.db)
         .await
@@ -105,7 +105,7 @@ pub async fn get_user_info(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(&user_id)
         .fetch_optional(&state.db)
         .await
@@ -130,7 +130,7 @@ pub async fn update_user(
     Path(user_id): Path<String>,
     Json(req): Json<UserUpdateRequest>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
-    let mut user: User = sqlx::query_as("SELECT * FROM users WHERE id = ?")
+    let mut user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
         .bind(&user_id)
         .fetch_optional(&state.db)
         .await
@@ -147,7 +147,7 @@ pub async fn update_user(
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
     sqlx::query(
-        r#"UPDATE users SET username=?, avatar=?, updated_at=? WHERE id=?"#,
+        r#"UPDATE users SET username=$1, avatar=$2, updated_at=$3 WHERE id=$4"#,
     )
     .bind(&user.username)
     .bind(&user.avatar)
@@ -184,7 +184,7 @@ pub async fn upgrade_vip(
 
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-    sqlx::query(r#"UPDATE users SET role=?, updated_at=? WHERE id=?"#)
+    sqlx::query(r#"UPDATE users SET role=$1, updated_at=$2 WHERE id=$3"#)
         .bind(new_role)
         .bind(&now)
         .bind(&user_id)

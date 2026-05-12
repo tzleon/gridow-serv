@@ -14,7 +14,7 @@ pub async fn list_history(
     let records = if let Some(ref history_type) = params.r#type {
         if let Some(ref before) = params.before {
             sqlx::query_as::<_, HistoryRecord>(
-                "SELECT * FROM history WHERE type = ? AND time < ? ORDER BY time DESC LIMIT ?",
+                "SELECT * FROM history WHERE type = $1 AND time < $2 ORDER BY time DESC LIMIT $3",
             )
             .bind(history_type)
             .bind(before)
@@ -24,7 +24,7 @@ pub async fn list_history(
             .map_err(AppError::Database)?
         } else {
             sqlx::query_as::<_, HistoryRecord>(
-                "SELECT * FROM history WHERE type = ? ORDER BY time DESC LIMIT ?",
+                "SELECT * FROM history WHERE type = $1 ORDER BY time DESC LIMIT $2",
             )
             .bind(history_type)
             .bind(limit)
@@ -34,7 +34,7 @@ pub async fn list_history(
         }
     } else if let Some(ref before) = params.before {
         sqlx::query_as::<_, HistoryRecord>(
-            "SELECT * FROM history WHERE time < ? ORDER BY time DESC LIMIT ?",
+            "SELECT * FROM history WHERE time < $1 ORDER BY time DESC LIMIT $2",
         )
         .bind(before)
         .bind(limit)
@@ -43,7 +43,7 @@ pub async fn list_history(
         .map_err(AppError::Database)?
     } else {
         sqlx::query_as::<_, HistoryRecord>(
-            "SELECT * FROM history ORDER BY time DESC LIMIT ?",
+            "SELECT * FROM history ORDER BY time DESC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&state.db)
@@ -59,7 +59,7 @@ pub async fn get_item_history(
     Path(item_id): Path<String>,
 ) -> Result<Json<Vec<HistoryRecord>>, AppError> {
     let records = sqlx::query_as::<_, HistoryRecord>(
-        "SELECT * FROM history WHERE item_id = ? ORDER BY time DESC",
+        "SELECT * FROM history WHERE item_id = $1 ORDER BY time DESC",
     )
     .bind(&item_id)
     .fetch_all(&state.db)
