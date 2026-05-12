@@ -27,6 +27,7 @@ pub struct SyncHistoryChange {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct SyncPushRequest {
     pub items: Option<SyncEntityChange<Item>>,
     pub spaces: Option<SyncEntityChange<Space>>,

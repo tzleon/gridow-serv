@@ -133,9 +133,3 @@ pub fn init_logging(log_dir: &str) {
         Local::now().to_rfc3339()
     );
 }
-
-pub fn get_current_log_file(log_dir: &str) -> String {
-    let now = Local::now();
-    let filename = format!("gridow.{}.log", now.format("%Y-%m"));
-    PathBuf::from(log_dir).join(filename).display().to_string()
-}
