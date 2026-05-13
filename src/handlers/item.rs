@@ -1,3 +1,17 @@
+//! 物品管理处理器
+//!
+//! 提供物品的完整生命周期管理：
+//! * 增删改查（含分页、排序、分类/关键字筛选）
+//! * 出库（减少库存，记录操作历史）
+//! * 转移（变更所属空间，同步更新空间计数）
+//! * 过期预警 / 低库存预警
+//! * 条码查询
+//!
+//! # 权限模型
+//! * **查询** — 仅返回当前用户拥有或协管的物品
+//! * **修改/出库/转移** — owner 或协管可操作
+//! * **删除** — 仅 owner 可操作
+
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -8,10 +22,15 @@ use crate::models::error::AppError;
 use crate::models::item::*;
 use crate::state::AppState;
 
+/// 权限校验：检查用户是否为实体的 owner 或协管
+///
+/// 若均不是则返回 `AppError::Forbidden`。
 async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id: &str, owner_id: &str) -> Result<(), AppError> {
+    // owner 直接通过
     if owner_id == user_id {
         return Ok(());
     }
+    // 查询协管表
     let (count,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
     )
@@ -28,11 +47,17 @@ async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id
     Err(AppError::Forbidden)
 }
 
+/// 物品列表查询
+///
+/// 支持条件组合：分类、关键字（模糊匹配 name/tags/location）、空间 ID。
+/// 分页参数：`page`（默认 1）、`pageSize`（默认 20）。
+/// 排序：`sortBy` 可选 `createdAt`/`name`/`qty`/`expiry`/`updatedAt`，`sortOrder` 可选 `asc`/`desc`。
 pub async fn list_items(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<ItemQueryParams>,
 ) -> Result<Json<ItemListResponse>, AppError> {
+    // 前端排序参数映射到数据库列名
     let sort_column = match params.sort_by.as_str() {
         "createdAt" => "created_at",
         "name" => "name",
@@ -46,11 +71,13 @@ pub async fn list_items(
     };
     let offset = (params.page - 1) * params.page_size;
 
+    // 构建 owner + 协管过滤条件
     let owner_condition = format!(
         " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = '{}'))",
         auth.user_id, auth.user_id
     );
 
+    // 使用 QueryBuilder 动态拼接 SQL
     let mut count_builder = sqlx::QueryBuilder::new(
         format!("SELECT COUNT(*) FROM items WHERE 1=1{}", owner_condition)
     );
@@ -58,6 +85,7 @@ pub async fn list_items(
         format!("SELECT * FROM items WHERE 1=1{}", owner_condition)
     );
 
+    // 分类筛选
     if let Some(ref category) = params.category {
         count_builder.push(" AND category = ");
         count_builder.push_bind(category.clone());
@@ -65,6 +93,7 @@ pub async fn list_items(
         data_builder.push_bind(category.clone());
     }
 
+    // 关键字模糊搜索
     if let Some(ref keyword) = params.keyword {
         let kw = format!("%{}%", keyword);
         count_builder.push(" AND (name LIKE ");
@@ -84,6 +113,7 @@ pub async fn list_items(
         data_builder.push(")");
     }
 
+    // 空间筛选
     if let Some(ref space_id) = params.space_id {
         count_builder.push(" AND location_id = ");
         count_builder.push_bind(space_id.clone());
@@ -117,6 +147,11 @@ pub async fn list_items(
     }))
 }
 
+/// 创建物品
+///
+/// 自动生成 UUID，设置 owner 为当前用户，
+/// 若指定了 `location_id` 则计算空间路径冗余字段并更新空间计数。
+/// 同时写入一条入库历史记录（type="in"）。
 pub async fn create_item(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -126,6 +161,7 @@ pub async fn create_item(
     let now = now_string();
     let tags_json = serde_json::to_string(&req.tags).unwrap_or_else(|_| "[]".to_string());
 
+    // 计算空间路径字符串（如 "🏠 客厅 > 🗄️ 电视柜"）
     let location = if let Some(ref loc_id) = req.location_id {
         get_space_path_string(&state, loc_id).await?
     } else {
@@ -164,10 +200,12 @@ pub async fn create_item(
         .await
         .map_err(AppError::Database)?;
 
+    // 更新空间计数
     if let Some(ref loc_id) = req.location_id {
         update_space_count(&state, loc_id).await?;
     }
 
+    // 写入入库历史
     create_history_record(
         &state,
         "in",
@@ -184,6 +222,9 @@ pub async fn create_item(
     Ok((axum::http::StatusCode::CREATED, Json(item)))
 }
 
+/// 获取单个物品详情
+///
+/// 需要 owner 或协管权限。
 pub async fn get_item(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -201,6 +242,9 @@ pub async fn get_item(
     Ok(Json(item))
 }
 
+/// 更新物品
+///
+/// 所有字段可选，不传则保留原值。若空间变更，同步更新新旧两个空间的计数。
 pub async fn update_item(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -216,6 +260,7 @@ pub async fn update_item(
 
     check_access(&state.db, &auth.user_id, "item", &item_id, &existing.owner_id).await?;
 
+    // 合并新旧值
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
     let qty = req.qty.unwrap_or(existing.qty);
@@ -275,6 +320,7 @@ pub async fn update_item(
         .await
         .map_err(AppError::Database)?;
 
+    // 空间变更时同步更新计数
     if old_location_id != location_id {
         if let Some(ref old_loc) = old_location_id {
             update_space_count(&state, old_loc).await?;
@@ -287,6 +333,9 @@ pub async fn update_item(
     Ok(Json(item))
 }
 
+/// 删除物品（仅 owner 可操作）
+///
+/// 级联清理关联的 history 和 collaborators 记录。
 pub async fn delete_item(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -299,10 +348,12 @@ pub async fn delete_item(
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
+    // 仅 owner 可删除
     if item.owner_id != auth.user_id {
         return Err(AppError::Forbidden);
     }
 
+    // 级联清理
     sqlx::query("DELETE FROM items WHERE id = $1")
         .bind(&item_id)
         .execute(&state.db)
@@ -328,6 +379,9 @@ pub async fn delete_item(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// 物品出库
+///
+/// 减少库存数量，写入出库历史记录。需 owner 或协管权限。
 pub async fn outbound_item(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -347,6 +401,7 @@ pub async fn outbound_item(
 
     check_access(&state.db, &auth.user_id, "item", &item_id, &existing.owner_id).await?;
 
+    // 库存不足
     if existing.qty < req.qty {
         return Err(AppError::BadRequest(format!(
             "库存不足，当前库存: {}",
@@ -391,6 +446,9 @@ pub async fn outbound_item(
     Ok(Json(item))
 }
 
+/// 物品转移
+///
+/// 更改物品所属空间，写入转移历史记录，同步更新新旧空间计数。
 pub async fn transfer_item(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -410,6 +468,7 @@ pub async fn transfer_item(
 
     check_access(&state.db, &auth.user_id, "item", &item_id, &existing.owner_id).await?;
 
+    // 验证目标空间存在
     let _target_space = sqlx::query_as::<_, crate::models::space::Space>(
         "SELECT * FROM spaces WHERE id = $1",
     )
@@ -453,6 +512,7 @@ pub async fn transfer_item(
     )
     .await?;
 
+    // 更新新旧空间计数
     if let Some(ref old_loc) = old_location_id {
         update_space_count(&state, old_loc).await?;
     }
@@ -461,6 +521,9 @@ pub async fn transfer_item(
     Ok(Json(item))
 }
 
+/// 按条码查询物品
+///
+/// 用于扫码枪 / 二维码扫描场景。
 pub async fn get_item_by_barcode(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -478,6 +541,9 @@ pub async fn get_item_by_barcode(
     Ok(Json(item))
 }
 
+/// 获取即将过期的物品列表
+///
+/// `days` 参数表示未来多少天内过期（默认 30）。
 pub async fn get_expiring_items(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -504,6 +570,9 @@ pub async fn get_expiring_items(
     Ok(Json(items))
 }
 
+/// 获取低库存物品列表
+///
+/// 仅返回 `track_low_stock = TRUE` 且数量 ≤ threshold 的物品。
 pub async fn get_low_stock_items(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -526,6 +595,8 @@ pub async fn get_low_stock_items(
     Ok(Json(items))
 }
 
+// ── 辅助类型 ────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 pub struct ExpiringQueryParams {
     days: Option<i32>,
@@ -536,6 +607,9 @@ pub struct LowStockQueryParams {
     threshold: Option<i32>,
 }
 
+// ── 内部辅助函数 ────────────────────────────────────────────
+
+/// 根据空间 ID 获取人类可读的路径字符串
 async fn get_space_path_string(state: &AppState, space_id: &str) -> Result<String, AppError> {
     let segments = crate::handlers::space::get_space_path_segments(&state.db, space_id).await?;
     Ok(segments
@@ -545,6 +619,7 @@ async fn get_space_path_string(state: &AppState, space_id: &str) -> Result<Strin
         .join(" > "))
 }
 
+/// 重新计算空间的物品数量并更新
 async fn update_space_count(state: &AppState, space_id: &str) -> Result<(), AppError> {
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE location_id = $1")
         .bind(space_id)
@@ -562,6 +637,7 @@ async fn update_space_count(state: &AppState, space_id: &str) -> Result<(), AppE
     Ok(())
 }
 
+/// 写入操作历史记录
 async fn create_history_record(
     state: &AppState,
     history_type: &str,

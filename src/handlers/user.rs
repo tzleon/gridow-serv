@@ -1,3 +1,10 @@
+//! 用户管理处理器
+//!
+//! 提供注册、登录、登出、信息查询/更新、VIP 升级功能。
+//! * 密码使用 bcrypt 哈希存储，登录时验证
+//! * 登录成功后返回 JWT Token（有效期 7 天）
+//! * 注册/登录/登出 为公开接口，其余接口（目前）无强制认证
+
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json as AxumJson};
@@ -13,10 +20,15 @@ use crate::models::user::{
 };
 use crate::state::AppState;
 
+/// 用户注册
+///
+/// 校验邮箱唯一性后，使用 bcrypt 哈希密码并写入数据库。
+/// 返回注册成功的用户信息（不含密码）。
 pub async fn register_user(
     State(state): State<AppState>,
     Json(req): Json<UserRegisterRequest>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
+    // 检查邮箱是否已被注册
     let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_one(&state.db)
@@ -27,6 +39,7 @@ pub async fn register_user(
         return Err(AppError::BadRequest("邮箱已被注册".to_string()));
     }
 
+    // bcrypt 哈希密码（cost=12）
     let password_hash = hash(&req.password, DEFAULT_COST)
         .map_err(|_| AppError::Internal("密码加密失败".to_string()))?;
 
@@ -48,7 +61,7 @@ pub async fn register_user(
     .await
     .map_err(AppError::Database)?;
 
-    let user_info = UserInfo {
+    Ok(AxumJson(UserInfo {
         id: user_id,
         username: req.username,
         email: req.email,
@@ -56,11 +69,13 @@ pub async fn register_user(
         role: "user".to_string(),
         status: "active".to_string(),
         created_at: now,
-    };
-
-    Ok(AxumJson(user_info))
+    }))
 }
 
+/// 用户登录
+///
+/// 验证邮箱和密码，返回用户信息与 JWT Token（Bearer 格式，7 天有效）。
+/// 已禁用账户（status != "active"）无法登录。
 pub async fn login_user(
     State(state): State<AppState>,
     Json(req): Json<UserLoginRequest>,
@@ -72,35 +87,42 @@ pub async fn login_user(
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
+    // 校验密码
     if !verify(&req.password, &user.password_hash)
         .map_err(|_| AppError::Internal("密码验证失败".to_string()))?
     {
         return Err(AppError::BadRequest("邮箱或密码错误".to_string()));
     }
 
+    // 检查账户状态
     if user.status != "active" {
         return Err(AppError::Forbidden);
     }
 
     let token = generate_token(&user.id, &state.jwt_secret).await?;
 
-    let user_info = UserInfo {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        avatar: user.avatar,
-        role: user.role,
-        status: user.status,
-        created_at: user.created_at,
-    };
-
-    Ok(AxumJson(UserLoginResponse { user: user_info, token }))
+    Ok(AxumJson(UserLoginResponse {
+        user: UserInfo {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            avatar: user.avatar,
+            role: user.role,
+            status: user.status,
+            created_at: user.created_at,
+        },
+        token,
+    }))
 }
 
+/// 用户登出
+///
+/// 当前为无状态实现，客户端只需丢弃 Token 即可。
 pub async fn logout_user() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
+/// 获取用户信息
 pub async fn get_user_info(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -112,7 +134,7 @@ pub async fn get_user_info(
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
-    let user_info = UserInfo {
+    Ok(AxumJson(UserInfo {
         id: user.id,
         username: user.username,
         email: user.email,
@@ -120,11 +142,12 @@ pub async fn get_user_info(
         role: user.role,
         status: user.status,
         created_at: user.created_at,
-    };
-
-    Ok(AxumJson(user_info))
+    }))
 }
 
+/// 更新用户信息
+///
+/// 当前仅允许修改 username 和 avatar。
 pub async fn update_user(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -157,7 +180,7 @@ pub async fn update_user(
     .await
     .map_err(AppError::Database)?;
 
-    let user_info = UserInfo {
+    Ok(AxumJson(UserInfo {
         id: user.id,
         username: user.username,
         email: user.email,
@@ -165,11 +188,12 @@ pub async fn update_user(
         role: user.role,
         status: user.status,
         created_at: user.created_at,
-    };
-
-    Ok(AxumJson(user_info))
+    }))
 }
 
+/// 升级 VIP
+///
+/// 支持的会员计划：`vip`、`vip_plus`。
 pub async fn upgrade_vip(
     State(state): State<AppState>,
     Path(user_id): Path<String>,
@@ -199,6 +223,9 @@ pub async fn upgrade_vip(
     }))
 }
 
+/// 生成 JWT Token
+///
+/// 使用 HMAC-SHA256 算法，载荷包含 `user_id` 和过期时间（7 天）。
 async fn generate_token(user_id: &str, secret: &str) -> Result<String, AppError> {
     let payload = json!({
         "user_id": user_id,

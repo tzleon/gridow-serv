@@ -1,3 +1,18 @@
+//! API 路由定义
+//!
+//! 所有路由统一挂载在 `/v1` 前缀下，按业务模块组织嵌套路由。
+//! 认证规则见各 Handler 文件的参数签名（`AuthUser` = 需登录）。
+//!
+//! # 路由结构
+//! ```
+//! /v1/users/*     — 用户注册/登录/信息/升级
+//! /v1/items/*     — 物品 CRUD / 出库 / 转移 / 协管
+//! /v1/spaces/*    — 空间 CRUD / 树 / 子节点 / 路径 / 协管
+//! /v1/history/*   — 操作历史查询
+//! /v1/images/*    — 图片上传与访问
+//! /v1/sync/*      — 离线增量同步
+//! ```
+
 use axum::routing::{get, post};
 use axum::Router;
 
@@ -6,6 +21,7 @@ use crate::state::AppState;
 
 pub fn create_router(state: AppState) -> Router {
     let api_v1 = Router::new()
+        // ── 用户模块 ─────────────────────────────────────────
         .nest(
             "/users",
             Router::new()
@@ -15,6 +31,7 @@ pub fn create_router(state: AppState) -> Router {
                 .route("/{user_id}", get(handlers::user::get_user_info).put(handlers::user::update_user))
                 .route("/{user_id}/upgrade", post(handlers::user::upgrade_vip)),
         )
+        // ── 物品模块 ─────────────────────────────────────────
         .nest(
             "/items",
             Router::new()
@@ -49,6 +66,7 @@ pub fn create_router(state: AppState) -> Router {
                     axum::routing::delete(handlers::collaborator::remove_item_collaborator),
                 ),
         )
+        // ── 空间模块 ─────────────────────────────────────────
         .nest(
             "/spaces",
             Router::new()
@@ -82,18 +100,21 @@ pub fn create_router(state: AppState) -> Router {
                     axum::routing::delete(handlers::collaborator::remove_space_collaborator),
                 ),
         )
+        // ── 操作历史模块 ─────────────────────────────────────
         .nest(
             "/history",
             Router::new()
                 .route("/", get(handlers::history::list_history))
                 .route("/item/{item_id}", get(handlers::history::get_item_history)),
         )
+        // ── 图片模块 ─────────────────────────────────────────
         .nest(
             "/images",
             Router::new()
                 .route("/upload", post(handlers::image::upload_image))
                 .route("/{filename}", get(handlers::image::get_image)),
         )
+        // ── 数据同步模块 ─────────────────────────────────────
         .nest(
             "/sync",
             Router::new()

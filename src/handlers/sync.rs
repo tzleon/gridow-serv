@@ -1,3 +1,17 @@
+//! 数据同步处理器
+//!
+//! 支持离线客户端与服务端的增量数据同步。
+//! * `sync_pull` — 客户端拉取自上次同步以来的增量变更
+//! * `sync_push` — 客户端推送本地变更（含冲突检测，ID 重复视为冲突）
+//! * `sync_status` — 查询当前同步状态
+//!
+//! # 原理
+//! 基于 `created_at` / `updated_at` 时间戳比较，
+//! 客户端保存上次 `sync_pull` 返回的 `server_time` 作为下次的 `last_sync_time`。
+//!
+//! # 权限模型
+//! `sync_pull` 仅返回当前用户拥有或协管的数据。
+
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -10,6 +24,10 @@ use crate::models::space::Space;
 use crate::models::sync::*;
 use crate::state::AppState;
 
+/// 同步拉取 — 获取服务端增量变更
+///
+/// 客户端传入 `last_sync_time`（上次同步时间），服务端返回此后的新创建/更新的数据。
+/// 仅返回当前用户授权范围内的 items 和 spaces。
 pub async fn sync_pull(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -17,6 +35,7 @@ pub async fn sync_pull(
 ) -> Result<Json<SyncPullResponse>, AppError> {
     let last_sync_time = params.last_sync_time.unwrap_or_default();
 
+    // 增量拉取物品：创建时间 > last_sync_time
     let created_items: Vec<Item> =
         sqlx::query_as(
             "SELECT * FROM items WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $2))"
@@ -27,6 +46,7 @@ pub async fn sync_pull(
         .await
         .map_err(AppError::Database)?;
 
+    // 增量拉取物品：更新时间 > last_sync_time 但非新建
     let updated_items: Vec<Item> =
         sqlx::query_as(
             "SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $3))"
@@ -38,6 +58,7 @@ pub async fn sync_pull(
         .await
         .map_err(AppError::Database)?;
 
+    // 增量拉取空间
     let created_spaces: Vec<Space> =
         sqlx::query_as(
             "SELECT * FROM spaces WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"
@@ -59,6 +80,7 @@ pub async fn sync_pull(
         .await
         .map_err(AppError::Database)?;
 
+    // 增量拉取历史记录（不按 owner 过滤，由 item 的 JOIN 已保证权限）
     let created_history: Vec<HistoryRecord> =
         sqlx::query_as("SELECT * FROM history WHERE time > $1")
             .bind(&last_sync_time)
@@ -91,12 +113,19 @@ pub async fn sync_pull(
     }))
 }
 
+/// 同步推送 — 将客户端变更写入服务端
+///
+/// 对 created 进行 ID 唯一性检查（重复 ID 视为冲突）。
+/// 对 updated 直接覆盖写入。
+/// 对 deleted 直接删除对应记录。
+/// 最后更新 `sync_status` 表。
 pub async fn sync_push(
     State(state): State<AppState>,
     Json(req): Json<SyncPushRequest>,
 ) -> Result<Json<SyncPushResponse>, AppError> {
     let mut conflicts = Vec::new();
 
+    // ── 物品同步 ────────────────────────────────────────────
     if let Some(items) = req.items {
         for item in items.created {
             let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM items WHERE id = $1")
@@ -176,6 +205,7 @@ pub async fn sync_push(
         }
     }
 
+    // ── 空间同步 ────────────────────────────────────────────
     if let Some(spaces) = req.spaces {
         for space in spaces.created {
             let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM spaces WHERE id = $1")
@@ -240,6 +270,7 @@ pub async fn sync_push(
         }
     }
 
+    // ── 历史记录同步 ────────────────────────────────────────
     if let Some(history) = req.history {
         for record in history.created {
             sqlx::query(
@@ -275,6 +306,7 @@ pub async fn sync_push(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
+    // 更新同步状态
     sqlx::query("UPDATE sync_status SET last_sync_time=$1, pending_changes=0 WHERE id=1")
         .bind(&server_time)
         .execute(&state.db)
@@ -288,6 +320,7 @@ pub async fn sync_push(
     }))
 }
 
+/// 查询同步状态
 pub async fn sync_status(
     State(state): State<AppState>,
 ) -> Result<Json<SyncStatusResponse>, AppError> {

@@ -1,3 +1,16 @@
+//! 空间管理处理器
+//!
+//! 提供空间（Space）的树形结构管理：
+//! * 增删改查（含按父节点筛选的子空间列表）
+//! * 空间树（返回当前用户授权的完整嵌套结构）
+//! * 子空间 / 空间下物品 / 空间路径查询
+//!
+//! # 权限模型
+//! * **查询** — 仅返回当前用户拥有或协管的空间
+//! * **修改** — owner 或协管可操作
+//! * **删除** — 仅 owner 可操作（递归删除子空间，释放关联物品）
+//! * **创建** — 任何已登录用户可创建
+
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
@@ -10,6 +23,7 @@ use crate::models::item::Item;
 use crate::models::space::*;
 use crate::state::AppState;
 
+/// 权限校验：检查用户是否为实体的 owner 或协管
 async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id: &str, owner_id: &str) -> Result<(), AppError> {
     if owner_id == user_id {
         return Ok(());
@@ -30,6 +44,10 @@ async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id
     Err(AppError::Forbidden)
 }
 
+/// 获取空间列表
+///
+/// 可通过 `parentId` 过滤指定父节点下的子空间；
+/// 不传则返回顶级空间。
 pub async fn list_spaces(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -64,6 +82,10 @@ pub async fn list_spaces(
     Ok(Json(spaces))
 }
 
+/// 创建空间
+///
+/// 若指定了父空间，则自动计算深度（parent.depth + 1）。
+/// owner 设置为当前登录用户。
 pub async fn create_space(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -108,6 +130,7 @@ pub async fn create_space(
     Ok((axum::http::StatusCode::CREATED, Json(space)))
 }
 
+/// 获取单个空间详情
 pub async fn get_space(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -125,6 +148,7 @@ pub async fn get_space(
     Ok(Json(space))
 }
 
+/// 更新空间
 pub async fn update_space(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -165,6 +189,10 @@ pub async fn update_space(
     Ok(Json(space))
 }
 
+/// 删除空间（仅 owner 可操作）
+///
+/// 递归删除所有子空间，并将关联物品的 `location_id` 置空。
+/// 同时清理协管关系。
 pub async fn delete_space(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -192,10 +220,12 @@ pub async fn delete_space(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+/// 递归删除空间树（栈式后序遍历，避免递归栈溢出）
 async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), AppError> {
     let mut stack = vec![space_id.to_string()];
 
     while let Some(current_id) = stack.pop() {
+        // 收集子空间入栈
         let children: Vec<Space> =
             sqlx::query_as("SELECT * FROM spaces WHERE parent_id = $1")
                 .bind(&current_id)
@@ -207,12 +237,14 @@ async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), 
             stack.push(child.id);
         }
 
+        // 释放关联物品
         sqlx::query("UPDATE items SET location_id=NULL, location='' WHERE location_id = $1")
             .bind(&current_id)
             .execute(&state.db)
             .await
             .map_err(AppError::Database)?;
 
+        // 删除空间自身
         sqlx::query("DELETE FROM spaces WHERE id = $1")
             .bind(&current_id)
             .execute(&state.db)
@@ -223,6 +255,10 @@ async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// 获取空间树
+///
+/// 返回当前用户授权的所有空间构成的树形结构（递归嵌套）。
+/// 每个节点附带了直接关联的物品 ID 列表。
 pub async fn get_space_tree(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -236,6 +272,7 @@ pub async fn get_space_tree(
         .await
         .map_err(AppError::Database)?;
 
+    // 批量查询所有空间的物品关联
     let owner_ids: Vec<String> = all_spaces.iter().map(|s| s.id.clone()).collect();
     let item_locations: Vec<(String, Option<String>)> = if owner_ids.is_empty() {
         vec![]
@@ -265,6 +302,9 @@ pub async fn get_space_tree(
     Ok(Json(root_nodes))
 }
 
+/// 递归构建空间树
+///
+/// `parent_id == None` 匹配顶级节点，`Some(pid)` 匹配指定父节点的子节点。
 fn build_space_tree(
     spaces: &[Space],
     parent_id: Option<&str>,
@@ -281,7 +321,6 @@ fn build_space_tree(
 
         if is_child {
             let children = build_space_tree(spaces, Some(&space.id), item_id_map);
-
             let item_ids = item_id_map.get(&space.id).cloned().unwrap_or_default();
 
             let node = SpaceNode {
@@ -303,6 +342,7 @@ fn build_space_tree(
     nodes
 }
 
+/// 获取空间的直接子空间列表
 pub async fn get_space_children(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -327,6 +367,7 @@ pub async fn get_space_children(
     Ok(Json(children))
 }
 
+/// 获取空间下的物品列表
 pub async fn get_space_items(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -350,6 +391,7 @@ pub async fn get_space_items(
     Ok(Json(items))
 }
 
+/// 获取空间路径（从根到当前空间的完整路径）
 pub async fn get_space_path(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -375,6 +417,7 @@ pub async fn get_space_path(
     Ok(Json(SpacePathResponse { path, segments }))
 }
 
+/// 查询空间路径段（从根向上追溯，不含权限校验）
 pub async fn get_space_path_segments(
     pool: &PgPool,
     space_id: &str,

@@ -1,3 +1,20 @@
+//! Gridow 格物 — 物品管理后台服务
+//!
+//! 基于 Axum + SQLx + PostgreSQL 构建的 RESTful API 服务。
+//! 支持物品 CRUD、空间树管理、用户认证、协管授权、数据同步等功能。
+//!
+//! # 启动
+//! ```bash
+//! DATABASE_URL=postgresql://... LISTEN_ADDR=0.0.0.0:8080 cargo run
+//! ```
+//!
+//! # 环境变量
+//! * `DATABASE_URL`  - PostgreSQL 连接字符串
+//! * `LISTEN_ADDR`   - 监听地址（默认 0.0.0.0:8080）
+//! * `UPLOAD_DIR`    - 图片上传目录（默认 ./uploads）
+//! * `LOG_DIR`       - 日志文件目录（默认 ./logs）
+//! * `JWT_SECRET`    - JWT 签名密钥
+
 mod auth;
 mod handlers;
 mod logging;
@@ -10,15 +27,24 @@ use std::path::PathBuf;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
+/// 应用程序入口
+///
+/// 执行流程：
+/// 1. 初始化日志系统（控制台 + 文件双输出，按月归档）
+/// 2. 连接 PostgreSQL 并自动建表
+/// 3. 构建 Axum 路由并挂载 CORS / Tracing 中间件
+/// 4. 绑定端口并启动 HTTP 服务
 #[tokio::main]
 async fn main() {
+    // ── 日志初始化 ──────────────────────────────────────────
     let log_dir = std::env::var("LOG_DIR")
         .unwrap_or_else(|_| "./logs".to_string());
-    
+
     logging::init_logging(&log_dir);
 
+    // ── 配置读取 ────────────────────────────────────────────
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:dfER%40123123@156.238.229.131:54328/gridow-web".to_string());
+        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:5432/gridow-web".to_string());
 
     let upload_dir = std::env::var("UPLOAD_DIR")
         .unwrap_or_else(|_| "./uploads".to_string());
@@ -26,21 +52,26 @@ async fn main() {
     let jwt_secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "gridow_jwt_secret_key_2024".to_string());
 
+    // ── 上传目录初始化 ──────────────────────────────────────
     let upload_path = PathBuf::from(&upload_dir);
     if !upload_path.exists() {
         std::fs::create_dir_all(&upload_path).expect("Failed to create upload directory");
     }
 
+    // ── 数据库初始化 ────────────────────────────────────────
     let pool = state::init_database(&database_url)
         .await
         .expect("Failed to initialize database");
 
+    // ── 共享状态 ────────────────────────────────────────────
     let app_state = state::AppState::new(pool, upload_dir, jwt_secret);
 
+    // ── 路由 + 中间件 ───────────────────────────────────────
     let app = routes::create_router(app_state)
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http());
+        .layer(CorsLayer::permissive())       // 允许跨域
+        .layer(TraceLayer::new_for_http());   // HTTP 请求追踪
 
+    // ── 启动服务 ────────────────────────────────────────────
     let addr = std::env::var("LISTEN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 

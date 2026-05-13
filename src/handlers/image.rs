@@ -1,3 +1,13 @@
+//! 图片管理处理器
+//!
+//! 提供图片上传和访问功能：
+//! * 上传支持 JPG / PNG / WEBP 格式，限制 10MB
+//! * 文件名使用 UUID v4 生成，避免冲突
+//! * 通过 `Content-Type` 头正确返回 MIME 类型
+//!
+//! # 安全说明
+//! 当前为公开接口（无需认证），适用于物品图片等非敏感资源。
+
 use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -8,6 +18,10 @@ use uuid::Uuid;
 use crate::models::error::AppError;
 use crate::state::AppState;
 
+/// 上传图片
+///
+/// 接收 `multipart/form-data` 格式的单个文件（字段名 `file`）。
+/// 返回图片 ID 和访问 URL。
 pub async fn upload_image(
     State(state): State<AppState>,
     mut multipart: Multipart,
@@ -23,6 +37,7 @@ pub async fn upload_image(
         let field_name = field.name().unwrap_or("").to_string();
 
         if field_name == "file" {
+            // 获取 Content-Type
             let content_type = field
                 .content_type()
                 .unwrap_or("application/octet-stream")
@@ -39,10 +54,12 @@ pub async fn upload_image(
                 .await
                 .map_err(|e| AppError::BadRequest(format!("读取文件失败: {}", e)))?;
 
+            // 限制 10MB
             if data.len() > 10 * 1024 * 1024 {
                 return Err(AppError::PayloadTooLarge);
             }
 
+            // 根据 Content-Type 确定扩展名
             let ext = match content_type.as_str() {
                 "image/jpeg" => "jpg",
                 "image/png" => "png",
@@ -79,6 +96,10 @@ pub async fn upload_image(
     ))
 }
 
+/// 获取图片
+///
+/// 根据文件名（含扩展名）返回图片二进制数据，
+/// 设置正确的 `Content-Type` 头。
 pub async fn get_image(
     State(state): State<AppState>,
     Path(filename): Path<String>,
@@ -93,6 +114,7 @@ pub async fn get_image(
         .await
         .map_err(|e| AppError::Internal(format!("读取文件失败: {}", e)))?;
 
+    // 根据扩展名推断 MIME 类型
     let content_type = match filepath.extension().and_then(|e| e.to_str()) {
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("png") => "image/png",
@@ -108,6 +130,7 @@ pub async fn get_image(
         .into_response())
 }
 
+/// 检查是否为允许的图片 Content-Type
 fn is_allowed_content_type(ct: &str) -> bool {
     matches!(ct, "image/jpeg" | "image/png" | "image/webp")
 }
