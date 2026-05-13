@@ -29,7 +29,7 @@ DATABASE_URL="${DATABASE_URL:-}"
 JWT_SECRET="${JWT_SECRET:-}"
 CARGO_FLAGS="${CARGO_FLAGS:-}"
 PID_FILE="/tmp/${PROJECT_NAME}.pid"
-CONF_FILE="$SCRIPT_DIR/gridow.conf"
+CONF_FILE="$BIN_DIR/../gridow.conf"
 
 # 颜色输出
 info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
