@@ -3,7 +3,8 @@
 //! * `AppState` — 所有 Handler 共享的状态（数据库连接池、上传目录、JWT 密钥）
 //! * `init_database` — 建表 + 索引，幂等执行（`IF NOT EXISTS`）
 
-use sqlx::PgPool;
+use sqlx::postgres::{PgPool, PgPoolOptions};
+use std::time::Duration;
 
 /// 应用全局共享状态
 ///
@@ -27,19 +28,29 @@ impl AppState {
 
 /// 初始化数据库：建立连接池，自动建表与索引
 ///
+/// 使用 `PgPoolOptions` 显式配置连接池参数，避免默认超时过短导致 `PoolTimedOut`。
 /// 所有 DDL 均使用 `IF NOT EXISTS`，多次调用安全。
 ///
-/// # 表结构
-/// | 表名            | 用途                     |
-/// |-----------------|--------------------------|
-/// | `users`         | 用户账户                  |
-/// | `items`         | 物品信息                  |
-/// | `spaces`        | 空间（树形结构）          |
-/// | `collaborators` | 协管关系（owner 授权）    |
-/// | `history`       | 入库/出库/转移操作记录    |
-/// | `sync_status`   | 离线同步状态（单行）      |
+/// # 连接池配置
+/// * `max_connections` = 10（PostgreSQL 默认最大 100，预留余量）
+/// * `acquire_timeout` = 10s（从池中获取连接的最大等待时间，超过则报 `PoolTimedOut`）
+/// * `idle_timeout` = 300s（空闲连接超过此时间将被回收）
+///
+/// # 常见连接失败原因
+/// * `DATABASE_URL` 格式错误（密码含特殊字符需 URL 编码，如 `@` -> `%40`）
+/// * 防火墙 / 安全组未放行 PostgreSQL 端口（默认 5432）
+/// * PostgreSQL 未监听外部连接（检查 `listen_addresses` 和 `pg_hba.conf`）
 pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
-    let pool = PgPool::connect(database_url).await?;
+    tracing::info!("Connecting to database...");
+
+    let pool = PgPoolOptions::new()
+        .max_connections(10)
+        .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(Duration::from_secs(300))
+        .connect(database_url)
+        .await?;
+
+    tracing::info!("Database connected, running migrations...");
 
     // ── 用户表 ──────────────────────────────────────────────
     sqlx::query(
