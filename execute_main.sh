@@ -23,13 +23,14 @@ PROJECT_NAME="gridow_web"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="${BIN_DIR:-/opt/gridow/bin}"
 LOG_DIR="${LOG_DIR:-/opt/gridow/logs}"
+CONF_DIR="${CONF_DIR:-/opt/gridow/conf}"
 UPLOAD_DIR="${UPLOAD_DIR:-/opt/gridow/uploads}"
 LISTEN_ADDR="${LISTEN_ADDR:-0.0.0.0:8080}"
 DATABASE_URL="${DATABASE_URL:-}"
 JWT_SECRET="${JWT_SECRET:-}"
 CARGO_FLAGS="${CARGO_FLAGS:-}"
 PID_FILE="/tmp/${PROJECT_NAME}.pid"
-CONF_FILE="$BIN_DIR/../gridow.conf"
+CONF_FILE="$CONF_DIR/gridow.conf"
 
 # 颜色输出
 info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
