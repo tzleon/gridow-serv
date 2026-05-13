@@ -142,10 +142,11 @@ unsafe impl Sync for SharedLogWriter {}
 pub fn init_logging(log_dir: &str) {
     let writer = SharedLogWriter::new(log_dir, "gridow");
 
-    // 控制台输出：人类可读格式
+    // 控制台输出：人类可读格式，关闭 ANSI 避免乱码
     let console_layer = fmt::layer()
         .with_target(true)
         .with_level(true)
+        .with_ansi(false)
         .with_writer(std::io::stdout);
 
     // 文件输出：JSON 格式，便于日志收集工具解析
