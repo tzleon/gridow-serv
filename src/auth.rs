@@ -12,11 +12,6 @@ pub struct AuthUser {
     pub user_id: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct OptionalAuthUser {
-    pub user_id: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct JwtClaims {
     user_id: String,
@@ -55,31 +50,5 @@ impl FromRequestParts<AppState> for AuthUser {
         let user_id = verify_token(token, &state.jwt_secret)?;
 
         Ok(AuthUser { user_id })
-    }
-}
-
-impl FromRequestParts<AppState> for OptionalAuthUser {
-    type Rejection = (StatusCode, &'static str);
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-
-        let user_id = match auth_header {
-            Some(header_value) => {
-                match header_value.strip_prefix("Bearer ") {
-                    Some(token) => verify_token(token, &state.jwt_secret).ok(),
-                    None => None,
-                }
-            }
-            None => None,
-        };
-
-        Ok(OptionalAuthUser { user_id })
     }
 }

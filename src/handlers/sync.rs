@@ -2,7 +2,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::auth::OptionalAuthUser;
+use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::models::history::HistoryRecord;
 use crate::models::item::Item;
@@ -12,94 +12,52 @@ use crate::state::AppState;
 
 pub async fn sync_pull(
     State(state): State<AppState>,
-    OptionalAuthUser { user_id }: OptionalAuthUser,
+    auth: AuthUser,
     Query(params): Query<SyncPullParams>,
 ) -> Result<Json<SyncPullResponse>, AppError> {
     let last_sync_time = params.last_sync_time.unwrap_or_default();
 
-    let (created_items, updated_items) = if let Some(ref uid) = user_id {
-        let created: Vec<Item> =
-            sqlx::query_as(
-                "SELECT * FROM items WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $2))"
-            )
-            .bind(&last_sync_time)
-            .bind(uid)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+    let created_items: Vec<Item> =
+        sqlx::query_as(
+            "SELECT * FROM items WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $2))"
+        )
+        .bind(&last_sync_time)
+        .bind(&auth.user_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
-        let updated: Vec<Item> =
-            sqlx::query_as(
-                "SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $3))"
-            )
-            .bind(&last_sync_time)
-            .bind(&last_sync_time)
-            .bind(uid)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+    let updated_items: Vec<Item> =
+        sqlx::query_as(
+            "SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $3))"
+        )
+        .bind(&last_sync_time)
+        .bind(&last_sync_time)
+        .bind(&auth.user_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
-        (created, updated)
-    } else {
-        let created: Vec<Item> =
-            sqlx::query_as("SELECT * FROM items WHERE created_at > $1")
-                .bind(&last_sync_time)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?;
+    let created_spaces: Vec<Space> =
+        sqlx::query_as(
+            "SELECT * FROM spaces WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"
+        )
+        .bind(&last_sync_time)
+        .bind(&auth.user_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
-        let updated: Vec<Item> =
-            sqlx::query_as("SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2")
-                .bind(&last_sync_time)
-                .bind(&last_sync_time)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?;
-
-        (created, updated)
-    };
-
-    let (created_spaces, updated_spaces) = if let Some(ref uid) = user_id {
-        let created: Vec<Space> =
-            sqlx::query_as(
-                "SELECT * FROM spaces WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"
-            )
-            .bind(&last_sync_time)
-            .bind(uid)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
-
-        let updated: Vec<Space> =
-            sqlx::query_as(
-                "SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3))"
-            )
-            .bind(&last_sync_time)
-            .bind(&last_sync_time)
-            .bind(uid)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
-
-        (created, updated)
-    } else {
-        let created: Vec<Space> =
-            sqlx::query_as("SELECT * FROM spaces WHERE created_at > $1")
-                .bind(&last_sync_time)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?;
-
-        let updated: Vec<Space> =
-            sqlx::query_as("SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2")
-                .bind(&last_sync_time)
-                .bind(&last_sync_time)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?;
-
-        (created, updated)
-    };
+    let updated_spaces: Vec<Space> =
+        sqlx::query_as(
+            "SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3))"
+        )
+        .bind(&last_sync_time)
+        .bind(&last_sync_time)
+        .bind(&auth.user_id)
+        .fetch_all(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
     let created_history: Vec<HistoryRecord> =
         sqlx::query_as("SELECT * FROM history WHERE time > $1")

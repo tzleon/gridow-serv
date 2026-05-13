@@ -4,7 +4,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::{AuthUser, OptionalAuthUser};
+use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::models::item::Item;
 use crate::models::space::*;
@@ -32,42 +32,30 @@ async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id
 
 pub async fn list_spaces(
     State(state): State<AppState>,
-    OptionalAuthUser { user_id }: OptionalAuthUser,
+    auth: AuthUser,
     Query(params): Query<SpaceListParams>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let spaces = if let Some(ref uid) = user_id {
-        let owner_condition = format!(
-            " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}'))",
-            uid, uid
+    let owner_condition = format!(
+        " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}'))",
+        auth.user_id, auth.user_id
+    );
+
+    let spaces = if let Some(ref parent_id) = params.parent_id {
+        let query = format!(
+            "SELECT * FROM spaces WHERE parent_id = $1{} ORDER BY sort_order, name",
+            owner_condition
         );
-        if let Some(ref parent_id) = params.parent_id {
-            let query = format!(
-                "SELECT * FROM spaces WHERE parent_id = $1{} ORDER BY sort_order, name",
-                owner_condition
-            );
-            sqlx::query_as::<_, Space>(&query)
-                .bind(parent_id)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?
-        } else {
-            let query = format!(
-                "SELECT * FROM spaces WHERE parent_id IS NULL{} ORDER BY sort_order, name",
-                owner_condition
-            );
-            sqlx::query_as::<_, Space>(&query)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?
-        }
-    } else if let Some(ref parent_id) = params.parent_id {
-        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
+        sqlx::query_as::<_, Space>(&query)
             .bind(parent_id)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?
     } else {
-        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id IS NULL ORDER BY sort_order, name")
+        let query = format!(
+            "SELECT * FROM spaces WHERE parent_id IS NULL{} ORDER BY sort_order, name",
+            owner_condition
+        );
+        sqlx::query_as::<_, Space>(&query)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?
@@ -122,6 +110,7 @@ pub async fn create_space(
 
 pub async fn get_space(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(space_id): Path<String>,
 ) -> Result<Json<Space>, AppError> {
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
@@ -130,6 +119,8 @@ pub async fn get_space(
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
+
+    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
 
     Ok(Json(space))
 }
@@ -234,23 +225,16 @@ async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), 
 
 pub async fn get_space_tree(
     State(state): State<AppState>,
-    OptionalAuthUser { user_id }: OptionalAuthUser,
+    auth: AuthUser,
 ) -> Result<Json<Vec<SpaceNode>>, AppError> {
-    let all_spaces: Vec<Space> = if let Some(ref uid) = user_id {
-        let query = format!(
-            "SELECT * FROM spaces WHERE (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}')) ORDER BY sort_order, name",
-            uid, uid
-        );
-        sqlx::query_as(&query)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
-    } else {
-        sqlx::query_as("SELECT * FROM spaces ORDER BY sort_order, name")
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
-    };
+    let query = format!(
+        "SELECT * FROM spaces WHERE (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}')) ORDER BY sort_order, name",
+        auth.user_id, auth.user_id
+    );
+    let all_spaces: Vec<Space> = sqlx::query_as(&query)
+        .fetch_all(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
     let owner_ids: Vec<String> = all_spaces.iter().map(|s| s.id.clone()).collect();
     let item_locations: Vec<(String, Option<String>)> = if owner_ids.is_empty() {
@@ -321,14 +305,17 @@ fn build_space_tree(
 
 pub async fn get_space_children(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(space_id): Path<String>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
+
+    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
 
     let children =
         sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
@@ -342,14 +329,17 @@ pub async fn get_space_children(
 
 pub async fn get_space_items(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(space_id): Path<String>,
 ) -> Result<Json<Vec<Item>>, AppError> {
-    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
+
+    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
 
     let items = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE location_id = $1")
         .bind(&space_id)
@@ -362,8 +352,18 @@ pub async fn get_space_items(
 
 pub async fn get_space_path(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(space_id): Path<String>,
 ) -> Result<Json<SpacePathResponse>, AppError> {
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
+        .bind(&space_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or(AppError::NotFound)?;
+
+    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
+
     let segments = get_space_path_segments(&state.db, &space_id).await?;
 
     let path = segments

@@ -3,7 +3,7 @@ use axum::Json;
 use serde::Deserialize;
 use sqlx::PgPool;
 
-use crate::auth::{AuthUser, OptionalAuthUser};
+use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::models::item::*;
 use crate::state::AppState;
@@ -30,7 +30,7 @@ async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id
 
 pub async fn list_items(
     State(state): State<AppState>,
-    OptionalAuthUser { user_id }: OptionalAuthUser,
+    auth: AuthUser,
     Query(params): Query<ItemQueryParams>,
 ) -> Result<Json<ItemListResponse>, AppError> {
     let sort_column = match params.sort_by.as_str() {
@@ -46,17 +46,17 @@ pub async fn list_items(
     };
     let offset = (params.page - 1) * params.page_size;
 
-    let mut count_builder = sqlx::QueryBuilder::new("SELECT COUNT(*) FROM items WHERE 1=1");
-    let mut data_builder = sqlx::QueryBuilder::new("SELECT * FROM items WHERE 1=1");
+    let owner_condition = format!(
+        " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = '{}'))",
+        auth.user_id, auth.user_id
+    );
 
-    if let Some(ref uid) = user_id {
-        let condition = format!(
-            " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = '{}'))",
-            uid, uid
-        );
-        count_builder.push(&condition);
-        data_builder.push(&condition);
-    }
+    let mut count_builder = sqlx::QueryBuilder::new(
+        format!("SELECT COUNT(*) FROM items WHERE 1=1{}", owner_condition)
+    );
+    let mut data_builder = sqlx::QueryBuilder::new(
+        format!("SELECT * FROM items WHERE 1=1{}", owner_condition)
+    );
 
     if let Some(ref category) = params.category {
         count_builder.push(" AND category = ");
@@ -186,6 +186,7 @@ pub async fn create_item(
 
 pub async fn get_item(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(item_id): Path<String>,
 ) -> Result<Json<Item>, AppError> {
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
@@ -194,6 +195,8 @@ pub async fn get_item(
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
+
+    check_access(&state.db, &auth.user_id, "item", &item_id, &item.owner_id).await?;
 
     Ok(Json(item))
 }
@@ -460,6 +463,7 @@ pub async fn transfer_item(
 
 pub async fn get_item_by_barcode(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(barcode): Path<String>,
 ) -> Result<Json<Item>, AppError> {
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE barcode = $1")
@@ -469,12 +473,14 @@ pub async fn get_item_by_barcode(
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
+    check_access(&state.db, &auth.user_id, "item", &item.id, &item.owner_id).await?;
+
     Ok(Json(item))
 }
 
 pub async fn get_expiring_items(
     State(state): State<AppState>,
-    OptionalAuthUser { user_id }: OptionalAuthUser,
+    auth: AuthUser,
     Query(params): Query<ExpiringQueryParams>,
 ) -> Result<Json<Vec<Item>>, AppError> {
     let days = params.days.unwrap_or(30);
@@ -483,61 +489,39 @@ pub async fn get_expiring_items(
         .map(|d| d.format("%Y-%m-%d").to_string())
         .unwrap_or_else(|| "2099-12-31".to_string());
 
-    let items = if let Some(ref uid) = user_id {
-        sqlx::query_as::<_, Item>(
-            r#"SELECT * FROM items
-               WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $1))
-               AND expiry != '-' AND expiry != '' AND expiry <= $2
-               ORDER BY expiry ASC"#,
-        )
-        .bind(uid)
-        .bind(&target_date)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_as::<_, Item>(
-            r#"SELECT * FROM items
-               WHERE expiry != '-' AND expiry != '' AND expiry <= $1
-               ORDER BY expiry ASC"#,
-        )
-        .bind(&target_date)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    };
+    let items = sqlx::query_as::<_, Item>(
+        r#"SELECT * FROM items
+           WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $1))
+           AND expiry != '-' AND expiry != '' AND expiry <= $2
+           ORDER BY expiry ASC"#,
+    )
+    .bind(&auth.user_id)
+    .bind(&target_date)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Database)?;
 
     Ok(Json(items))
 }
 
 pub async fn get_low_stock_items(
     State(state): State<AppState>,
-    OptionalAuthUser { user_id }: OptionalAuthUser,
+    auth: AuthUser,
     Query(params): Query<LowStockQueryParams>,
 ) -> Result<Json<Vec<Item>>, AppError> {
     let threshold = params.threshold.unwrap_or(1);
 
-    let items = if let Some(ref uid) = user_id {
-        sqlx::query_as::<_, Item>(
-            r#"SELECT * FROM items
-               WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $1))
-               AND track_low_stock = TRUE AND qty <= $2
-               ORDER BY qty ASC"#,
-        )
-        .bind(uid)
-        .bind(threshold)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    } else {
-        sqlx::query_as::<_, Item>(
-            "SELECT * FROM items WHERE track_low_stock = TRUE AND qty <= $1 ORDER BY qty ASC",
-        )
-        .bind(threshold)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    };
+    let items = sqlx::query_as::<_, Item>(
+        r#"SELECT * FROM items
+           WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $1))
+           AND track_low_stock = TRUE AND qty <= $2
+           ORDER BY qty ASC"#,
+    )
+    .bind(&auth.user_id)
+    .bind(threshold)
+    .fetch_all(&state.db)
+    .await
+    .map_err(AppError::Database)?;
 
     Ok(Json(items))
 }
