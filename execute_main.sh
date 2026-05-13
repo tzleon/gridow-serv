@@ -10,16 +10,10 @@
 #   5. 启动新版本服务
 #
 # 用法:
-#   ./update_from_source.sh
+#   ./execute_main.sh
 #
-# 可选环境变量:
-#   BIN_DIR      部署目录 (默认 /opt/gridow/bin)
-#   LOG_DIR      日志目录 (默认 /opt/gridow/logs)
-#   UPLOAD_DIR   上传目录 (默认 /opt/gridow/uploads)
-#   LISTEN_ADDR  监听地址 (默认 0.0.0.0:8080)
-#   DATABASE_URL PostgreSQL 连接字符串
-#   JWT_SECRET   JWT 签名密钥
-#   CARGO_FLAGS  额外的 cargo 编译参数
+# 配置文件: gridow.conf (样例见 gridow.conf.example)
+# 环境变量优先级高于配置文件。
 
 set -euo pipefail
 
@@ -35,6 +29,29 @@ DATABASE_URL="${DATABASE_URL:-}"
 JWT_SECRET="${JWT_SECRET:-}"
 CARGO_FLAGS="${CARGO_FLAGS:-}"
 PID_FILE="/tmp/${PROJECT_NAME}.pid"
+CONF_FILE="$SCRIPT_DIR/gridow.conf"
+
+# ── 加载配置文件（环境变量已设置的不会被覆盖） ──
+if [ -f "$CONF_FILE" ]; then
+    info "从配置文件加载: $CONF_FILE"
+    # 逐行读取，跳过空行和注释，保护现有环境变量
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs)
+        # 跳过空行和注释
+        [ -z "$key" ] && continue
+        [[ "$key" =~ ^# ]] && continue
+        # 去除引号
+        value=$(echo "$value" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+        var_name="${key%% *}"
+        # 环境变量已设置则跳过
+        if [ -z "${!var_name:-}" ]; then
+            export "$var_name"="$value"
+        fi
+    done < "$CONF_FILE"
+else
+    warn "未找到配置文件 $CONF_FILE"
+    warn "请复制 gridow.conf.example 为 gridow.conf 并填入实际值"
+fi
 
 # 颜色输出
 info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }

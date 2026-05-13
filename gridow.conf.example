@@ -1,0 +1,26 @@
+# Gridow 服务配置文件
+# 用法: 复制此文件为 gridow.conf 并填入实际值
+#       cp gridow.conf.example gridow.conf
+
+# PostgreSQL 连接字符串
+# 格式: postgresql://用户名:密码@主机:端口/数据库名
+# 密码含特殊字符需 URL 编码 (如 @ -> %40, # -> %23)
+DATABASE_URL="postgresql://user:password@localhost:5432/gridow-web"
+
+# JWT 签名密钥 (建议随机生成: openssl rand -base64 32)
+JWT_SECRET=""
+
+# 监听地址 (可选，默认 0.0.0.0:8080)
+# LISTEN_ADDR="0.0.0.0:8080"
+
+# 上传目录 (可选，默认 /opt/gridow/uploads)
+# UPLOAD_DIR="/opt/gridow/uploads"
+
+# 日志目录 (可选，默认 /opt/gridow/logs)
+# LOG_DIR="/opt/gridow/logs"
+
+# 二进制部署目录 (可选，默认 /opt/gridow/bin)
+# BIN_DIR="/opt/gridow/bin"
+
+# 额外的 cargo 编译参数 (可选)
+# CARGO_FLAGS=""

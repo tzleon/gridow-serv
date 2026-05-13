@@ -42,15 +42,15 @@ async fn main() {
 
     logging::init_logging(&log_dir);
 
-    // ── 配置读取 ────────────────────────────────────────────
+    // ── 配置读取（敏感信息通过环境变量或 gridow.conf 注入） ──
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:dfER%40123123@156.238.229.131:54328/gridow-web".to_string());
+        .expect("DATABASE_URL 未设置，请在 gridow.conf 或环境变量中配置");
 
     let upload_dir = std::env::var("UPLOAD_DIR")
         .unwrap_or_else(|_| "./uploads".to_string());
 
     let jwt_secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "gridow_jwt_secret_key_2024".to_string());
+        .expect("JWT_SECRET 未设置，请在 gridow.conf 或环境变量中配置");
 
     // ── 上传目录初始化 ──────────────────────────────────────
     let upload_path = PathBuf::from(&upload_dir);
