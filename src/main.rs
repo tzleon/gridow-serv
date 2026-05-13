@@ -44,7 +44,7 @@ async fn main() {
 
     // ── 配置读取 ────────────────────────────────────────────
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgresql://postgres:password@localhost:5432/gridow-web".to_string());
+        .unwrap_or_else(|_| "postgresql://postgres:dfER%40123123@156.238.229.131:54328/gridow-web".to_string());
 
     let upload_dir = std::env::var("UPLOAD_DIR")
         .unwrap_or_else(|_| "./uploads".to_string());
