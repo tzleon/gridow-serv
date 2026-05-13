@@ -263,11 +263,11 @@ pub async fn get_space_tree(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Vec<SpaceNode>>, AppError> {
-    let query = format!(
-        "SELECT * FROM spaces WHERE (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}')) ORDER BY sort_order, name",
-        auth.user_id, auth.user_id
-    );
-    let all_spaces: Vec<Space> = sqlx::query_as(&query)
+    let all_spaces: Vec<Space> = sqlx::query_as::<_, Space>(
+        "SELECT * FROM spaces WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) ORDER BY sort_order, name"
+    )
+        .bind(&auth.user_id)
+        .bind(&auth.user_id)
         .fetch_all(&state.db)
         .await
         .map_err(AppError::Database)?;
@@ -277,13 +277,15 @@ pub async fn get_space_tree(
     let item_locations: Vec<(String, Option<String>)> = if owner_ids.is_empty() {
         vec![]
     } else {
-        let placeholders: Vec<String> = (1..=owner_ids.len()).map(|i| format!("${}", i)).collect();
         let mut query_builder = sqlx::QueryBuilder::new(
-            format!("SELECT id, location_id FROM items WHERE location_id IN ({})", placeholders.join(","))
+            "SELECT id, location_id FROM items WHERE location_id IN ("
         );
+        let mut separated = query_builder.separated(", ");
         for oid in &owner_ids {
-            query_builder.push_bind(oid.clone());
+            separated.push_bind(oid);
         }
+        separated.push_unseparated(")");
+
         query_builder
             .build_query_as()
             .fetch_all(&state.db)

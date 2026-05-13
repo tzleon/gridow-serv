@@ -1,2 +1,0 @@
-{"timestamp":"2026-05-08T12:24:49.990741Z","level":"INFO","fields":{"message":"Logging initialized, log directory: ./logs, current time: 2026-05-08T20:24:49.990397700+08:00"},"target":"gridow_web::logging"}
-{"timestamp":"2026-05-08T12:24:59.665554Z","level":"INFO","fields":{"message":"Gridow server listening on 0.0.0.0:8080"},"target":"gridow_web"}
