@@ -31,6 +31,12 @@ CARGO_FLAGS="${CARGO_FLAGS:-}"
 PID_FILE="/tmp/${PROJECT_NAME}.pid"
 CONF_FILE="$SCRIPT_DIR/gridow.conf"
 
+# 颜色输出
+info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
+ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
+warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
+error() { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
+
 # ── 加载配置文件（环境变量已设置的不会被覆盖） ──
 if [ -f "$CONF_FILE" ]; then
     info "从配置文件加载: $CONF_FILE"
@@ -52,12 +58,6 @@ else
     warn "未找到配置文件 $CONF_FILE"
     warn "请复制 gridow.conf.example 为 gridow.conf 并填入实际值"
 fi
-
-# 颜色输出
-info()  { echo -e "\033[1;34m[INFO]\033[0m  $*"; }
-ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
-warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
-error() { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
 # ─────────────── 前置检查 ───────────────
 
