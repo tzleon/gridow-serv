@@ -17,6 +17,8 @@ pub struct Item {
     pub buy_date: String,
     pub expiry: String,
     pub remark: String,
+    pub track_low_stock: bool,
+    pub owner_id: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -43,6 +45,8 @@ pub struct ItemCreateRequest {
     pub expiry: String,
     #[serde(default)]
     pub remark: String,
+    #[serde(default)]
+    pub track_low_stock: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +62,7 @@ pub struct ItemUpdateRequest {
     pub buy_date: Option<String>,
     pub expiry: Option<String>,
     pub remark: Option<String>,
+    pub track_low_stock: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

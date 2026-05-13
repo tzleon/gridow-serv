@@ -10,6 +10,7 @@ pub struct Space {
     pub depth: i32,
     pub sort_order: i32,
     pub photo_uri: String,
+    pub owner_id: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -43,6 +44,7 @@ pub struct SpaceNode {
     pub photo_uri: String,
     pub children: Vec<SpaceNode>,
     pub item_ids: Vec<String>,
+    pub owner_id: String,
 }
 
 #[derive(Debug, Serialize)]

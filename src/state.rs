@@ -51,6 +51,8 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             buy_date VARCHAR NOT NULL DEFAULT '',
             expiry VARCHAR NOT NULL DEFAULT '-',
             remark VARCHAR NOT NULL DEFAULT '',
+            track_low_stock BOOLEAN NOT NULL DEFAULT FALSE,
+            owner_id VARCHAR NOT NULL DEFAULT '',
             created_at VARCHAR NOT NULL,
             updated_at VARCHAR NOT NULL
         )
@@ -70,8 +72,24 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             depth INT NOT NULL DEFAULT 0,
             sort_order INT NOT NULL DEFAULT 0,
             photo_uri VARCHAR NOT NULL DEFAULT '',
+            owner_id VARCHAR NOT NULL DEFAULT '',
             created_at VARCHAR NOT NULL,
             updated_at VARCHAR NOT NULL
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS collaborators (
+            id VARCHAR PRIMARY KEY,
+            entity_type VARCHAR NOT NULL,
+            entity_id VARCHAR NOT NULL,
+            user_id VARCHAR NOT NULL,
+            created_at VARCHAR NOT NULL,
+            CONSTRAINT uq_collaborator UNIQUE (entity_type, entity_id, user_id)
         )
         "#,
     )
@@ -138,7 +156,19 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_updated_at ON items(updated_at)")
         .execute(&pool)
         .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_owner_id ON items(owner_id)")
+        .execute(&pool)
+        .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_parent_id ON spaces(parent_id)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_owner_id ON spaces(owner_id)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_collaborators_entity ON collaborators(entity_type, entity_id)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_collaborators_user ON collaborators(user_id)")
         .execute(&pool)
         .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_item_id ON history(item_id)")

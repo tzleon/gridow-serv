@@ -2,6 +2,7 @@ use axum::extract::{Query, State};
 use axum::Json;
 use serde::Deserialize;
 
+use crate::auth::OptionalAuthUser;
 use crate::models::error::AppError;
 use crate::models::history::HistoryRecord;
 use crate::models::item::Item;
@@ -11,39 +12,94 @@ use crate::state::AppState;
 
 pub async fn sync_pull(
     State(state): State<AppState>,
+    OptionalAuthUser { user_id }: OptionalAuthUser,
     Query(params): Query<SyncPullParams>,
 ) -> Result<Json<SyncPullResponse>, AppError> {
     let last_sync_time = params.last_sync_time.unwrap_or_default();
 
-    let created_items: Vec<Item> =
-        sqlx::query_as("SELECT * FROM items WHERE created_at > $1")
+    let (created_items, updated_items) = if let Some(ref uid) = user_id {
+        let created: Vec<Item> =
+            sqlx::query_as(
+                "SELECT * FROM items WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $2))"
+            )
             .bind(&last_sync_time)
+            .bind(uid)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?;
 
-    let updated_items: Vec<Item> =
-        sqlx::query_as("SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2")
+        let updated: Vec<Item> =
+            sqlx::query_as(
+                "SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $3))"
+            )
             .bind(&last_sync_time)
             .bind(&last_sync_time)
+            .bind(uid)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?;
 
-    let created_spaces: Vec<Space> =
-        sqlx::query_as("SELECT * FROM spaces WHERE created_at > $1")
+        (created, updated)
+    } else {
+        let created: Vec<Item> =
+            sqlx::query_as("SELECT * FROM items WHERE created_at > $1")
+                .bind(&last_sync_time)
+                .fetch_all(&state.db)
+                .await
+                .map_err(AppError::Database)?;
+
+        let updated: Vec<Item> =
+            sqlx::query_as("SELECT * FROM items WHERE updated_at > $1 AND created_at <= $2")
+                .bind(&last_sync_time)
+                .bind(&last_sync_time)
+                .fetch_all(&state.db)
+                .await
+                .map_err(AppError::Database)?;
+
+        (created, updated)
+    };
+
+    let (created_spaces, updated_spaces) = if let Some(ref uid) = user_id {
+        let created: Vec<Space> =
+            sqlx::query_as(
+                "SELECT * FROM spaces WHERE created_at > $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"
+            )
             .bind(&last_sync_time)
+            .bind(uid)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?;
 
-    let updated_spaces: Vec<Space> =
-        sqlx::query_as("SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2")
+        let updated: Vec<Space> =
+            sqlx::query_as(
+                "SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3))"
+            )
             .bind(&last_sync_time)
             .bind(&last_sync_time)
+            .bind(uid)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?;
+
+        (created, updated)
+    } else {
+        let created: Vec<Space> =
+            sqlx::query_as("SELECT * FROM spaces WHERE created_at > $1")
+                .bind(&last_sync_time)
+                .fetch_all(&state.db)
+                .await
+                .map_err(AppError::Database)?;
+
+        let updated: Vec<Space> =
+            sqlx::query_as("SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2")
+                .bind(&last_sync_time)
+                .bind(&last_sync_time)
+                .fetch_all(&state.db)
+                .await
+                .map_err(AppError::Database)?;
+
+        (created, updated)
+    };
 
     let created_history: Vec<HistoryRecord> =
         sqlx::query_as("SELECT * FROM history WHERE time > $1")
@@ -100,8 +156,8 @@ pub async fn sync_push(
                 });
             } else {
                 sqlx::query(
-                    r#"INSERT INTO items (id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, created_at, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
+                    r#"INSERT INTO items (id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, track_low_stock, owner_id, created_at, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)"#,
                 )
                 .bind(&item.id)
                 .bind(&item.name)
@@ -117,6 +173,8 @@ pub async fn sync_push(
                 .bind(&item.buy_date)
                 .bind(&item.expiry)
                 .bind(&item.remark)
+                .bind(item.track_low_stock)
+                .bind(&item.owner_id)
                 .bind(&item.created_at)
                 .bind(&item.updated_at)
                 .execute(&state.db)
@@ -127,8 +185,8 @@ pub async fn sync_push(
 
         for item in items.updated {
             sqlx::query(
-                r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photos=$9, photo_uri=$10, buy_date=$11, expiry=$12, remark=$13, updated_at=$14
-                   WHERE id=$15"#,
+                r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photos=$9, photo_uri=$10, buy_date=$11, expiry=$12, remark=$13, track_low_stock=$14, updated_at=$15
+                   WHERE id=$16"#,
             )
             .bind(&item.name)
             .bind(&item.icon)
@@ -143,6 +201,7 @@ pub async fn sync_push(
             .bind(&item.buy_date)
             .bind(&item.expiry)
             .bind(&item.remark)
+            .bind(item.track_low_stock)
             .bind(&item.updated_at)
             .bind(&item.id)
             .execute(&state.db)
@@ -176,8 +235,8 @@ pub async fn sync_push(
                 });
             } else {
                 sqlx::query(
-                    r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, created_at, updated_at)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+                    r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
                 )
                 .bind(&space.id)
                 .bind(&space.name)
@@ -187,6 +246,7 @@ pub async fn sync_push(
                 .bind(space.depth)
                 .bind(space.sort_order)
                 .bind(&space.photo_uri)
+                .bind(&space.owner_id)
                 .bind(&space.created_at)
                 .bind(&space.updated_at)
                 .execute(&state.db)

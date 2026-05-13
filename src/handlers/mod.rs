@@ -1,3 +1,4 @@
+pub mod collaborator;
 pub mod item;
 pub mod space;
 pub mod history;

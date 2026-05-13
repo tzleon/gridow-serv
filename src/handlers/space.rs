@@ -4,16 +4,63 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::auth::{AuthUser, OptionalAuthUser};
 use crate::models::error::AppError;
 use crate::models::item::Item;
 use crate::models::space::*;
 use crate::state::AppState;
 
+async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id: &str, owner_id: &str) -> Result<(), AppError> {
+    if owner_id == user_id {
+        return Ok(());
+    }
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
+    )
+    .bind(entity_type)
+    .bind(entity_id)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    if count > 0 {
+        return Ok(());
+    }
+    Err(AppError::Forbidden)
+}
+
 pub async fn list_spaces(
     State(state): State<AppState>,
+    OptionalAuthUser { user_id }: OptionalAuthUser,
     Query(params): Query<SpaceListParams>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let spaces = if let Some(ref parent_id) = params.parent_id {
+    let spaces = if let Some(ref uid) = user_id {
+        let owner_condition = format!(
+            " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}'))",
+            uid, uid
+        );
+        if let Some(ref parent_id) = params.parent_id {
+            let query = format!(
+                "SELECT * FROM spaces WHERE parent_id = $1{} ORDER BY sort_order, name",
+                owner_condition
+            );
+            sqlx::query_as::<_, Space>(&query)
+                .bind(parent_id)
+                .fetch_all(&state.db)
+                .await
+                .map_err(AppError::Database)?
+        } else {
+            let query = format!(
+                "SELECT * FROM spaces WHERE parent_id IS NULL{} ORDER BY sort_order, name",
+                owner_condition
+            );
+            sqlx::query_as::<_, Space>(&query)
+                .fetch_all(&state.db)
+                .await
+                .map_err(AppError::Database)?
+        }
+    } else if let Some(ref parent_id) = params.parent_id {
         sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
             .bind(parent_id)
             .fetch_all(&state.db)
@@ -31,6 +78,7 @@ pub async fn list_spaces(
 
 pub async fn create_space(
     State(state): State<AppState>,
+    auth: AuthUser,
     Json(req): Json<SpaceCreateRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Space>), AppError> {
     let id = Uuid::new_v4().to_string();
@@ -52,8 +100,8 @@ pub async fn create_space(
     };
 
     let space = sqlx::query_as::<_, Space>(
-        r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, created_at, updated_at)
-           VALUES ($1, $2, $3, 0, $4, $5, 0, $6, $7, $8)
+        r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
+           VALUES ($1, $2, $3, 0, $4, $5, 0, $6, $7, $8, $9)
            RETURNING *"#,
     )
     .bind(&id)
@@ -62,6 +110,7 @@ pub async fn create_space(
     .bind(&parent_id)
     .bind(depth)
     .bind(&req.photo_uri)
+    .bind(&auth.user_id)
     .bind(&now)
     .bind(&now)
     .fetch_one(&state.db)
@@ -87,6 +136,7 @@ pub async fn get_space(
 
 pub async fn update_space(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(space_id): Path<String>,
     Json(req): Json<SpaceUpdateRequest>,
 ) -> Result<Json<Space>, AppError> {
@@ -96,6 +146,8 @@ pub async fn update_space(
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
+
+    check_access(&state.db, &auth.user_id, "space", &space_id, &existing.owner_id).await?;
 
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
@@ -124,16 +176,27 @@ pub async fn update_space(
 
 pub async fn delete_space(
     State(state): State<AppState>,
+    auth: AuthUser,
     Path(space_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let _space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(&space_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
+    if space.owner_id != auth.user_id {
+        return Err(AppError::Forbidden);
+    }
+
     delete_space_recursive(&state, &space_id).await?;
+
+    sqlx::query("DELETE FROM collaborators WHERE entity_type = 'space' AND entity_id = $1")
+        .bind(&space_id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
@@ -171,18 +234,41 @@ async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), 
 
 pub async fn get_space_tree(
     State(state): State<AppState>,
+    OptionalAuthUser { user_id }: OptionalAuthUser,
 ) -> Result<Json<Vec<SpaceNode>>, AppError> {
-    let all_spaces: Vec<Space> =
+    let all_spaces: Vec<Space> = if let Some(ref uid) = user_id {
+        let query = format!(
+            "SELECT * FROM spaces WHERE (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}')) ORDER BY sort_order, name",
+            uid, uid
+        );
+        sqlx::query_as(&query)
+            .fetch_all(&state.db)
+            .await
+            .map_err(AppError::Database)?
+    } else {
         sqlx::query_as("SELECT * FROM spaces ORDER BY sort_order, name")
             .fetch_all(&state.db)
             .await
-            .map_err(AppError::Database)?;
+            .map_err(AppError::Database)?
+    };
 
-    let item_locations: Vec<(String, Option<String>)> =
-        sqlx::query_as("SELECT id, location_id FROM items")
+    let owner_ids: Vec<String> = all_spaces.iter().map(|s| s.id.clone()).collect();
+    let item_locations: Vec<(String, Option<String>)> = if owner_ids.is_empty() {
+        vec![]
+    } else {
+        let placeholders: Vec<String> = (1..=owner_ids.len()).map(|i| format!("${}", i)).collect();
+        let mut query_builder = sqlx::QueryBuilder::new(
+            format!("SELECT id, location_id FROM items WHERE location_id IN ({})", placeholders.join(","))
+        );
+        for oid in &owner_ids {
+            query_builder.push_bind(oid.clone());
+        }
+        query_builder
+            .build_query_as()
             .fetch_all(&state.db)
             .await
-            .map_err(AppError::Database)?;
+            .map_err(AppError::Database)?
+    };
 
     let mut item_id_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
     for (item_id, location_id) in item_locations {
@@ -224,6 +310,7 @@ fn build_space_tree(
                 photo_uri: space.photo_uri.clone(),
                 children,
                 item_ids,
+                owner_id: space.owner_id.clone(),
             };
             nodes.push(node);
         }

@@ -455,6 +455,68 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /items/{itemId}/collaborators:
+    get:
+      tags: [物品]
+      summary: 获取物品协管列表
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollaboratorListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [物品]
+      summary: 添加物品协管
+      description: 仅所有者可添加协管
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCollaboratorRequest"
+      responses:
+        "201":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collaborator"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /items/{itemId}/collaborators/{userId}:
+    delete:
+      tags: [物品]
+      summary: 移除物品协管
+      description: 仅所有者可移除协管
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+        - name: userId
+          in: path
+          required: true
+          description: 协管用户ID
+          schema:
+            type: string
+      responses:
+        "204":
+          description: 移除成功
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
   /items/barcode/{barcode}:
     get:
       tags: [物品]
@@ -610,6 +672,68 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Item"
+
+  /spaces/{spaceId}/collaborators:
+    get:
+      tags: [空间]
+      summary: 获取空间协管列表
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      responses:
+        "200":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollaboratorListResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [空间]
+      summary: 添加空间协管
+      description: 仅所有者可添加协管
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCollaboratorRequest"
+      responses:
+        "201":
+          description: 成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collaborator"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /spaces/{spaceId}/collaborators/{userId}:
+    delete:
+      tags: [空间]
+      summary: 移除空间协管
+      description: 仅所有者可移除协管
+      parameters:
+        - $ref: "#/components/parameters/SpaceId"
+        - name: userId
+          in: path
+          required: true
+          description: 协管用户ID
+          schema:
+            type: string
+      responses:
+        "204":
+          description: 移除成功
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /spaces/{spaceId}/path:
     get:
@@ -869,6 +993,13 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
 
+    Forbidden:
+      description: 无权限访问
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
   schemas:
     ErrorResponse:
       type: object
@@ -1025,6 +1156,13 @@ components:
           type: string
           description: 备注
           default: ""
+        trackLowStock:
+          type: boolean
+          description: 是否跟踪低库存
+          default: false
+        ownerId:
+          type: string
+          description: 所有者用户ID
         createdAt:
           type: string
           format: date-time
@@ -1079,6 +1217,10 @@ components:
         remark:
           type: string
           default: ""
+        trackLowStock:
+          type: boolean
+          default: false
+          description: 是否跟踪低库存
 
     ItemUpdateRequest:
       type: object
@@ -1111,6 +1253,9 @@ components:
           type: string
         remark:
           type: string
+        trackLowStock:
+          type: boolean
+          description: 是否跟踪低库存
 
     OutboundRequest:
       type: object
@@ -1173,6 +1318,9 @@ components:
           type: string
           default: ""
           description: 空间图片URL
+        ownerId:
+          type: string
+          description: 所有者用户ID
         createdAt:
           type: string
           format: date-time
@@ -1424,3 +1572,54 @@ components:
           oneOf:
             - $ref: "#/components/schemas/Item"
             - $ref: "#/components/schemas/Space"
+
+    Collaborator:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        entityType:
+          type: string
+          enum: [item, space]
+          description: 实体类型
+        entityId:
+          type: string
+          format: uuid
+          description: 实体ID
+        userId:
+          type: string
+          description: 协管用户ID
+        createdAt:
+          type: string
+          format: date-time
+
+    AddCollaboratorRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId:
+          type: string
+          description: 要添加为协管的用户ID
+
+    CollaboratorInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        userId:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        avatar:
+          type: string
+
+    CollaboratorListResponse:
+      type: object
+      properties:
+        collaborators:
+          type: array
+          items:
+            $ref: "#/components/schemas/CollaboratorInfo"

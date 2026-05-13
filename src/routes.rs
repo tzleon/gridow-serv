@@ -38,6 +38,15 @@ pub fn create_router(state: AppState) -> Router {
                 .route(
                     "/{item_id}/transfer",
                     post(handlers::item::transfer_item),
+                )
+                .route(
+                    "/{item_id}/collaborators",
+                    get(handlers::collaborator::list_item_collaborators)
+                        .post(handlers::collaborator::add_item_collaborator),
+                )
+                .route(
+                    "/{item_id}/collaborators/{user_id}",
+                    axum::routing::delete(handlers::collaborator::remove_item_collaborator),
                 ),
         )
         .nest(
@@ -62,6 +71,15 @@ pub fn create_router(state: AppState) -> Router {
                 .route(
                     "/{space_id}/path",
                     get(handlers::space::get_space_path),
+                )
+                .route(
+                    "/{space_id}/collaborators",
+                    get(handlers::collaborator::list_space_collaborators)
+                        .post(handlers::collaborator::add_space_collaborator),
+                )
+                .route(
+                    "/{space_id}/collaborators/{user_id}",
+                    axum::routing::delete(handlers::collaborator::remove_space_collaborator),
                 ),
         )
         .nest(
