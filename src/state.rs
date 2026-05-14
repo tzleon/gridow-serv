@@ -156,6 +156,36 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    // ── 分类表 ──────────────────────────────────────────
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS categories (
+            id VARCHAR PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            icon VARCHAR NOT NULL DEFAULT '📦',
+            sort_order INT NOT NULL DEFAULT 0,
+            owner_id VARCHAR NOT NULL DEFAULT '',
+            created_at VARCHAR NOT NULL
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    // ── 标签表 ──────────────────────────────────────────
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS tags (
+            id VARCHAR PRIMARY KEY,
+            name VARCHAR NOT NULL,
+            owner_id VARCHAR NOT NULL DEFAULT '',
+            created_at VARCHAR NOT NULL
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     // ── 同步状态表（单行） ──────────────────────────────────
     sqlx::query(
         r#"
@@ -222,6 +252,12 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .execute(&pool)
         .await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_time ON history(time)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_categories_owner_id ON categories(owner_id)")
+        .execute(&pool)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tags_owner_id ON tags(owner_id)")
         .execute(&pool)
         .await?;
 

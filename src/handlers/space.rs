@@ -53,27 +53,28 @@ pub async fn list_spaces(
     auth: AuthUser,
     Query(params): Query<SpaceListParams>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let owner_condition = format!(
-        " AND (owner_id = '{}' OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = '{}'))",
-        auth.user_id, auth.user_id
-    );
-
     let spaces = if let Some(ref parent_id) = params.parent_id {
-        let query = format!(
-            "SELECT * FROM spaces WHERE parent_id = $1{} ORDER BY sort_order, name",
-            owner_condition
-        );
-        sqlx::query_as::<_, Space>(&query)
+        sqlx::query_as::<_, Space>(
+            "SELECT * FROM spaces \
+             WHERE parent_id = $1 \
+             AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3)) \
+             ORDER BY sort_order, name"
+        )
             .bind(parent_id)
+            .bind(&auth.user_id)
+            .bind(&auth.user_id)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?
     } else {
-        let query = format!(
-            "SELECT * FROM spaces WHERE parent_id IS NULL{} ORDER BY sort_order, name",
-            owner_condition
-        );
-        sqlx::query_as::<_, Space>(&query)
+        sqlx::query_as::<_, Space>(
+            "SELECT * FROM spaces \
+             WHERE parent_id IS NULL \
+             AND (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) \
+             ORDER BY sort_order, name"
+        )
+            .bind(&auth.user_id)
+            .bind(&auth.user_id)
             .fetch_all(&state.db)
             .await
             .map_err(AppError::Database)?

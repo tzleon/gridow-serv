@@ -9,11 +9,13 @@
 //! /v1/items/*     — 物品 CRUD / 出库 / 转移 / 协管
 //! /v1/spaces/*    — 空间 CRUD / 树 / 子节点 / 路径 / 协管
 //! /v1/history/*   — 操作历史查询
+//! /v1/categories/* — 分类 CRUD
+//! /v1/tags/*      — 标签 CRUD
 //! /v1/images/*    — 图片上传与访问
 //! /v1/sync/*      — 离线增量同步
 //! ```
 
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 
 use crate::handlers;
@@ -106,6 +108,26 @@ pub fn create_router(state: AppState) -> Router {
             Router::new()
                 .route("/", get(handlers::history::list_history))
                 .route("/item/{item_id}", get(handlers::history::get_item_history)),
+        )
+        // ── 分类模块 ─────────────────────────────────────────
+        .nest(
+            "/categories",
+            Router::new()
+                .route("/", get(handlers::category::list_categories).post(handlers::category::create_category))
+                .route(
+                    "/{category_id}",
+                    put(handlers::category::update_category).delete(handlers::category::delete_category),
+                ),
+        )
+        // ── 标签模块 ─────────────────────────────────────────
+        .nest(
+            "/tags",
+            Router::new()
+                .route("/", get(handlers::tag::list_tags).post(handlers::tag::create_tag))
+                .route(
+                    "/{tag_id}",
+                    put(handlers::tag::update_tag).delete(handlers::tag::delete_tag),
+                ),
         )
         // ── 图片模块 ─────────────────────────────────────────
         .nest(

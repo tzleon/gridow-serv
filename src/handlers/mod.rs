@@ -8,11 +8,15 @@
 //! * `image`        — `/v1/images/*`
 //! * `sync`         — `/v1/sync/*`
 //! * `collaborator` — `/v1/{items,spaces}/{id}/collaborators/*`
+//! * `category`     — `/v1/categories/*`
+//! * `tag`          — `/v1/tags/*`
 
+pub mod category;
 pub mod collaborator;
 pub mod item;
 pub mod space;
 pub mod history;
 pub mod image;
 pub mod sync;
+pub mod tag;
 pub mod user;
