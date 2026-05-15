@@ -74,7 +74,7 @@ pub async fn create_category(
         .format("%Y-%m-%d %H:%M:%S")
         .to_string();
 
-    let next_order: i64 = sqlx::query_scalar(
+    let next_order: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories WHERE owner_id = $1"
     )
         .bind(&auth.user_id)
