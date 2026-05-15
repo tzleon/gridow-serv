@@ -38,6 +38,78 @@ ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
 error() { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
+stop_process() {
+    # 方式 1: 通过 PID 文件
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            info "向进程 $pid 发送 SIGTERM..."
+            kill -TERM "$pid" 2>/dev/null || true
+
+            for i in $(seq 1 15); do
+                if ! kill -0 "$pid" 2>/dev/null; then
+                    break
+                fi
+                sleep 1
+            done
+
+            if kill -0 "$pid" 2>/dev/null; then
+                warn "进程未响应 SIGTERM，强制 kill"
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    # 方式 2: 通过进程名查找
+    local pids
+    pids=$(pgrep -f "$PROJECT_NAME" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        for pid in $pids; do
+            if [ "$pid" != "$$" ]; then
+                info "终止残留进程 $pid"
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done
+        sleep 2
+        pids=$(pgrep -f "$PROJECT_NAME" 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            for pid in $pids; do
+                [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null || true
+            done
+        fi
+    fi
+}
+
+start_service() {
+    local binary_path="$1"
+    local success_label="$2"
+
+    info "启动服务..."
+    export LOG_DIR
+    export UPLOAD_DIR
+    export LISTEN_ADDR
+    if [ -n "$DATABASE_URL" ]; then export DATABASE_URL; fi
+    if [ -n "$JWT_SECRET" ]; then export JWT_SECRET; fi
+
+    nohup "$binary_path" > "$LOG_DIR/stdout.log" 2> "$LOG_DIR/stderr.log" &
+    local pid=$!
+    echo "$pid" > "$PID_FILE"
+
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+        ok "===== ${success_label} ====="
+        info "PID: $pid"
+        info "监听: $LISTEN_ADDR"
+        info "日志: $LOG_DIR/stdout.log / stderr.log"
+    else
+        error "===== 启动失败 ====="
+        error "请检查日志: $LOG_DIR/stderr.log"
+        exit 1
+    fi
+}
+
 # ── 命令行参数 ──────────────────────
 MODE="deploy"
 for arg in "$@"; do
@@ -86,30 +158,7 @@ if [ "$MODE" = "restart" ]; then
     LATEST_PATH="$BIN_DIR/$PROJECT_NAME"
     stop_process
     ok "进程已停止"
-
-    # 启动服务
-    info "启动服务..."
-    export LOG_DIR
-    export UPLOAD_DIR
-    export LISTEN_ADDR
-    if [ -n "$DATABASE_URL" ]; then export DATABASE_URL; fi
-    if [ -n "$JWT_SECRET" ]; then export JWT_SECRET; fi
-
-    nohup "$LATEST_PATH" > "$LOG_DIR/stdout.log" 2> "$LOG_DIR/stderr.log" &
-    NEW_PID=$!
-    echo "$NEW_PID" > "$PID_FILE"
-
-    sleep 2
-    if kill -0 "$NEW_PID" 2>/dev/null; then
-        ok "===== 重启成功 ====="
-        info "PID: $NEW_PID"
-        info "监听: $LISTEN_ADDR"
-        info "日志: $LOG_DIR/stdout.log / stderr.log"
-    else
-        error "===== 启动失败 ====="
-        error "请检查日志: $LOG_DIR/stderr.log"
-        exit 1
-    fi
+    start_service "$LATEST_PATH" "重启成功"
     exit 0
 fi
 
@@ -192,54 +241,6 @@ fi
 
 info "3/5 停止当前进程..."
 
-stop_process() {
-    # 方式 1: 通过 PID 文件
-    if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-            info "向进程 $pid 发送 SIGTERM..."
-            kill -TERM "$pid" 2>/dev/null || true
-
-            # 等待最多 15 秒
-            for i in $(seq 1 15); do
-                if ! kill -0 "$pid" 2>/dev/null; then
-                    break
-                fi
-                sleep 1
-            done
-
-            # 若仍未退出则强制 kill
-            if kill -0 "$pid" 2>/dev/null; then
-                warn "进程未响应 SIGTERM，强制 kill"
-                kill -9 "$pid" 2>/dev/null || true
-            fi
-        fi
-        rm -f "$PID_FILE"
-    fi
-
-    # 方式 2: 通过进程名查找
-    local pids
-    pids=$(pgrep -f "$PROJECT_NAME" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        for pid in $pids; do
-            # 跳过当前脚本自身
-            if [ "$pid" != "$$" ]; then
-                info "终止残留进程 $pid"
-                kill -TERM "$pid" 2>/dev/null || true
-            fi
-        done
-        sleep 2
-        # 再次检查并强制终止
-        pids=$(pgrep -f "$PROJECT_NAME" 2>/dev/null || true)
-        if [ -n "$pids" ]; then
-            for pid in $pids; do
-                [ "$pid" != "$$" ] && kill -9 "$pid" 2>/dev/null || true
-            done
-        fi
-    fi
-}
-
 stop_process
 ok "进程已停止"
 
@@ -277,39 +278,4 @@ cd "$SCRIPT_DIR"
 # ─────────────── 5. 启动服务 ───────────────
 
 info "5/5 启动服务..."
-
-# 设置环境变量
-export LOG_DIR
-export UPLOAD_DIR
-export LISTEN_ADDR
-
-if [ -n "$DATABASE_URL" ]; then
-    export DATABASE_URL
-fi
-if [ -n "$JWT_SECRET" ]; then
-    export JWT_SECRET
-fi
-
-# 后台启动
-nohup "$LATEST_PATH" > "$LOG_DIR/stdout.log" 2> "$LOG_DIR/stderr.log" &
-NEW_PID=$!
-echo "$NEW_PID" > "$PID_FILE"
-
-# 等待 2 秒检查是否启动成功
-sleep 2
-
-if kill -0 "$NEW_PID" 2>/dev/null; then
-    ok "===== 部署成功 ====="
-    info "PID: $NEW_PID"
-    info "监听: $LISTEN_ADDR"
-    info "日志: $LOG_DIR/stdout.log / stderr.log"
-    info "二进制: $DEPLOY_PATH"
-    echo ""
-    info "如需回滚:"
-    info "  cd $BIN_DIR && ls -1t ${PROJECT_NAME}_*"
-    info "  ln -sf <旧版本名称> $LATEST_NAME && 重新启动"
-else
-    error "===== 服务启动失败 ====="
-    error "请检查日志: $LOG_DIR/stderr.log"
-    exit 1
-fi
+start_service "$LATEST_PATH" "部署成功"
