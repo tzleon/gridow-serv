@@ -38,6 +38,21 @@ ok()    { echo -e "\033[1;32m[OK]\033[0m    $*"; }
 warn()  { echo -e "\033[1;33m[WARN]\033[0m  $*"; }
 error() { echo -e "\033[1;31m[ERROR]\033[0m $*"; }
 
+# ── 命令行参数 ──────────────────────
+MODE="deploy"
+for arg in "$@"; do
+    case "$arg" in
+        restart) MODE="restart" ;;
+        deploy)  MODE="deploy" ;;
+        *)
+            info "用法: $0 [deploy|restart]"
+            info "  deploy  - 拉取代码、编译、部署（默认）"
+            info "  restart - 仅重启服务（不拉代码不编译）"
+            exit 0
+            ;;
+    esac
+done
+
 # ── 加载配置文件（环境变量已设置的不会被覆盖） ──
 if [ -f "$CONF_FILE" ]; then
     info "从配置文件加载: $CONF_FILE"
@@ -64,6 +79,39 @@ fi
 
 info "===== Gridow 自动部署开始 ====="
 info "时间: $(date '+%Y-%m-%d %H:%M:%S')"
+info "模式: ${MODE}"
+
+if [ "$MODE" = "restart" ]; then
+    info "===== 仅重启服务，跳过拉代码与编译 ====="
+    LATEST_PATH="$BIN_DIR/$PROJECT_NAME"
+    stop_process
+    ok "进程已停止"
+
+    # 启动服务
+    info "启动服务..."
+    export LOG_DIR
+    export UPLOAD_DIR
+    export LISTEN_ADDR
+    if [ -n "$DATABASE_URL" ]; then export DATABASE_URL; fi
+    if [ -n "$JWT_SECRET" ]; then export JWT_SECRET; fi
+
+    nohup "$LATEST_PATH" > "$LOG_DIR/stdout.log" 2> "$LOG_DIR/stderr.log" &
+    NEW_PID=$!
+    echo "$NEW_PID" > "$PID_FILE"
+
+    sleep 2
+    if kill -0 "$NEW_PID" 2>/dev/null; then
+        ok "===== 重启成功 ====="
+        info "PID: $NEW_PID"
+        info "监听: $LISTEN_ADDR"
+        info "日志: $LOG_DIR/stdout.log / stderr.log"
+    else
+        error "===== 启动失败 ====="
+        error "请检查日志: $LOG_DIR/stderr.log"
+        exit 1
+    fi
+    exit 0
+fi
 
 if ! command -v cargo &> /dev/null; then
     error "未找到 cargo，请先安装 Rust 工具链"
