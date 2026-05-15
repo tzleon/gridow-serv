@@ -29,14 +29,16 @@ pub struct HistoryRecord {
 
 /// 历史记录查询参数
 ///
-/// 支持按类型筛选、游标分页（`before` + `limit`）。
+/// 支持按类型筛选、时间段筛选（`after` + `before`）、游标分页（`before` + `limit`）。
 #[derive(Debug, Deserialize)]
 pub struct HistoryQueryParams {
     pub r#type: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i32,
-    /// 游标：查询此时间之前的记录
+    /// 游标/截止时间：查询此时间之前的记录
     pub before: Option<String>,
+    /// 起始时间：查询此时间之后（含）的记录
+    pub after: Option<String>,
 }
 
 fn default_limit() -> i32 {

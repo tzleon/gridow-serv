@@ -17,7 +17,7 @@ use crate::state::AppState;
 
 /// 操作历史列表查询
 ///
-/// 支持按操作类型（`type`）筛选、游标分页（`before` + `limit`）。
+/// 支持按操作类型（`type`）筛选、时间段（`after` + `before`）筛选、游标分页（`before` + `limit`）。
 /// 通过 JOIN items 过滤：仅返回当前用户拥有或协管的物品的历史。
 pub async fn list_history(
     State(state): State<AppState>,
@@ -26,68 +26,39 @@ pub async fn list_history(
 ) -> Result<Json<Vec<HistoryRecord>>, AppError> {
     let limit = params.limit.clamp(1, 100);
 
-    let records = if let Some(ref history_type) = params.r#type {
-        if let Some(ref before) = params.before {
-            // 按类型 + 游标筛选
-            sqlx::query_as::<_, HistoryRecord>(
-                r#"SELECT h.* FROM history h
-                   JOIN items i ON h.item_id = i.id
-                   WHERE h.type = $1 AND h.time < $2
-                   AND (i.owner_id = $3 OR i.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $3))
-                   ORDER BY h.time DESC LIMIT $4"#,
-            )
-            .bind(history_type)
-            .bind(before)
-            .bind(&auth.user_id)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
-        } else {
-            // 仅按类型筛选
-            sqlx::query_as::<_, HistoryRecord>(
-                r#"SELECT h.* FROM history h
-                   JOIN items i ON h.item_id = i.id
-                   WHERE h.type = $1
-                   AND (i.owner_id = $2 OR i.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $2))
-                   ORDER BY h.time DESC LIMIT $3"#,
-            )
-            .bind(history_type)
-            .bind(&auth.user_id)
-            .bind(limit)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
-        }
-    } else if let Some(ref before) = params.before {
-        // 仅游标分页
-        sqlx::query_as::<_, HistoryRecord>(
-            r#"SELECT h.* FROM history h
-               JOIN items i ON h.item_id = i.id
-               WHERE h.time < $1
-               AND (i.owner_id = $2 OR i.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $2))
-               ORDER BY h.time DESC LIMIT $3"#,
-        )
-        .bind(before)
-        .bind(&auth.user_id)
-        .bind(limit)
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT h.* FROM history h \
+         JOIN items i ON h.item_id = i.id \
+         WHERE (i.owner_id = ",
+    );
+    builder.push_bind(&auth.user_id);
+    builder.push(" OR i.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = ");
+    builder.push_bind(&auth.user_id);
+    builder.push("))");
+
+    if let Some(ref history_type) = params.r#type {
+        builder.push(" AND h.type = ");
+        builder.push_bind(history_type);
+    }
+
+    if let Some(ref after) = params.after {
+        builder.push(" AND h.time >= ");
+        builder.push_bind(after);
+    }
+
+    if let Some(ref before) = params.before {
+        builder.push(" AND h.time < ");
+        builder.push_bind(before);
+    }
+
+    builder.push(" ORDER BY h.time DESC LIMIT ");
+    builder.push_bind(limit);
+
+    let records = builder
+        .build_query_as()
         .fetch_all(&state.db)
         .await
-        .map_err(AppError::Database)?
-    } else {
-        // 无筛选条件
-        sqlx::query_as::<_, HistoryRecord>(
-            r#"SELECT h.* FROM history h
-               JOIN items i ON h.item_id = i.id
-               WHERE (i.owner_id = $1 OR i.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = $1))
-               ORDER BY h.time DESC LIMIT $2"#,
-        )
-        .bind(&auth.user_id)
-        .bind(limit)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?
-    };
+        .map_err(AppError::Database)?;
 
     Ok(Json(records))
 }

@@ -8,6 +8,12 @@ pub struct Category {
     pub sort_order: i32,
     pub owner_id: String,
     pub created_at: String,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub item_count: i64,
+    #[sqlx(default)]
+    #[serde(default)]
+    pub last_used_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

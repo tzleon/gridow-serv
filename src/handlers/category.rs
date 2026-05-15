@@ -10,12 +10,24 @@ use crate::state::AppState;
 /// 获取当前用户的分类列表
 ///
 /// 若用户尚无分类，自动创建默认分类集合并返回。
+/// 排序规则：12小时内创建的最前 → 物品最多的 → 最近使用的 → 创建最晚的 → 无物品的
 pub async fn list_categories(
     State(state): State<AppState>,
     auth: AuthUser,
 ) -> Result<Json<Vec<Category>>, AppError> {
     let categories = sqlx::query_as::<_, Category>(
-        "SELECT * FROM categories WHERE owner_id = $1 ORDER BY sort_order, name"
+        r#"SELECT c.*,
+                  COALESCE(COUNT(i.id), 0) AS item_count,
+                  MAX(i.updated_at) AS last_used_at
+           FROM categories c
+           LEFT JOIN items i ON i.category = c.id AND i.owner_id = $1
+           WHERE c.owner_id = $1
+           GROUP BY c.id
+           ORDER BY
+                CASE WHEN c.created_at::timestamp >= (NOW() - INTERVAL '12 hours') THEN 0 ELSE 1 END,
+                COUNT(i.id) DESC,
+                MAX(i.updated_at) DESC NULLS LAST,
+                c.created_at DESC"#,
     )
         .bind(&auth.user_id)
         .fetch_all(&state.db)
