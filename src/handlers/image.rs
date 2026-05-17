@@ -2,8 +2,9 @@
 //!
 //! 提供图片上传和访问功能：
 //! * 上传支持 JPG / PNG / WEBP 格式，限制 10MB
+//! * 自动检查图片大小，超过阈值自动缩放至缩略图（最大 800x800 像素）
 //! * 文件名使用 UUID v4 生成，避免冲突
-//! * 通过 `Content-Type` 头正确返回 MIME 类型
+//! * 通过 Content-Type 头正确返回 MIME 类型
 //!
 //! # 安全说明
 //! 当前为公开接口（无需认证），适用于物品图片等非敏感资源。
@@ -12,11 +13,16 @@ use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use image::ImageFormat;
+use std::io::Cursor;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::models::error::AppError;
 use crate::state::AppState;
+
+/// 缩略图最大尺寸
+const MAX_THUMBNAIL_SIZE: u32 = 800;
 
 /// 上传图片
 ///
@@ -59,23 +65,18 @@ pub async fn upload_image(
                 return Err(AppError::PayloadTooLarge);
             }
 
-            // 根据 Content-Type 确定扩展名
-            let ext = match content_type.as_str() {
-                "image/jpeg" => "jpg",
-                "image/png" => "png",
-                "image/webp" => "webp",
-                _ => "bin",
-            };
+            // 处理图片，超过阈值自动缩放到缩略图大小
+            let (processed_data, output_ext) = process_image(&data, &content_type)?;
 
             image_id = Uuid::new_v4().to_string();
-            let filename = format!("{}.{}", image_id, ext);
+            let filename = format!("{}.{}", image_id, output_ext);
             let filepath = std::path::Path::new(&state.upload_dir).join(&filename);
 
             let mut file = tokio::fs::File::create(&filepath)
                 .await
                 .map_err(|e| AppError::Internal(format!("创建文件失败: {}", e)))?;
 
-            file.write_all(&data)
+            file.write_all(&processed_data)
                 .await
                 .map_err(|e| AppError::Internal(format!("写入文件失败: {}", e)))?;
 
@@ -96,10 +97,56 @@ pub async fn upload_image(
     ))
 }
 
+/// 处理图片：检查大小并在超过阈值时自动缩放
+///
+/// 最大尺寸为 800x800 像素，保持宽高比
+fn process_image(data: &[u8], content_type: &str) -> Result<(Vec<u8>, String), AppError> {
+    let format = match content_type {
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/png" => ImageFormat::Png,
+        "image/webp" => ImageFormat::WebP,
+        _ => return Err(AppError::BadRequest("不支持的图片格式".to_string())),
+    };
+
+    // 从字节数据加载图片
+    let img = image::load_from_memory_with_format(data, format)
+        .map_err(|e| AppError::BadRequest(format!("图片加载失败: {}", e)))?;
+
+    // 检查是否需要缩放
+    if img.width() <= MAX_THUMBNAIL_SIZE && img.height() <= MAX_THUMBNAIL_SIZE {
+        // 图片已经符合尺寸要求，直接返回原数据
+        Ok((data.to_vec(), content_type_to_ext(content_type)))
+    } else {
+        // 缩放到缩略图大小，保持宽高比
+        let resized_img = img.resize(MAX_THUMBNAIL_SIZE, MAX_THUMBNAIL_SIZE, image::imageops::FilterType::Lanczos3);
+
+        // 将处理后的图片写回到字节数组
+        let mut buffer = Vec::new();
+        let mut cursor = Cursor::new(&mut buffer);
+
+        // 保存为 JPEG 格式，质量 85（平衡质量和文件大小）
+        resized_img
+            .write_to(&mut cursor, ImageFormat::Jpeg)
+            .map_err(|e| AppError::Internal(format!("图片处理失败: {}", e)))?;
+
+        Ok((buffer, "jpg".to_string()))
+    }
+}
+
+/// 将 Content-Type 转换为文件扩展名
+fn content_type_to_ext(content_type: &str) -> String {
+    match content_type {
+        "image/jpeg" => "jpg".to_string(),
+        "image/png" => "png".to_string(),
+        "image/webp" => "webp".to_string(),
+        _ => "bin".to_string(),
+    }
+}
+
 /// 获取图片
 ///
 /// 根据文件名（含扩展名）返回图片二进制数据，
-/// 设置正确的 `Content-Type` 头。
+/// 设置正确的 Content-Type 头。
 pub async fn get_image(
     State(state): State<AppState>,
     Path(filename): Path<String>,
