@@ -18,11 +18,13 @@ pub struct AppState {
     pub upload_dir: String,
     /// JWT HMAC-SHA256 签名密钥
     pub jwt_secret: String,
+    /// 服务器基础 URL（用于生成完整图片 URL）
+    pub base_url: String,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, upload_dir: String, jwt_secret: String) -> Self {
-        Self { db, upload_dir, jwt_secret }
+    pub fn new(db: PgPool, upload_dir: String, jwt_secret: String, base_url: String) -> Self {
+        Self { db, upload_dir, jwt_secret, base_url }
     }
 }
 

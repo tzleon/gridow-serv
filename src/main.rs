@@ -64,7 +64,9 @@ async fn main() {
         .expect("Failed to initialize database");
 
     // ── 共享状态 ────────────────────────────────────────────
-    let app_state = state::AppState::new(pool, upload_dir, jwt_secret);
+    let base_url = std::env::var("BASE_URL")
+        .unwrap_or_else(|_| "https://gridow.richking.top".to_string());
+    let app_state = state::AppState::new(pool, upload_dir, jwt_secret, base_url);
 
     // ── 路由 + 中间件 ───────────────────────────────────────
     let app = routes::create_router(app_state)

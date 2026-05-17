@@ -80,7 +80,7 @@ pub async fn upload_image(
                 .await
                 .map_err(|e| AppError::Internal(format!("写入文件失败: {}", e)))?;
 
-            image_url = format!("/v1/images/{}", filename);
+            image_url = format!("{}/v1/images/{}", state.base_url.trim_end_matches('/'), filename);
         }
     }
 
