@@ -10,6 +10,9 @@ DATABASE_URL="postgresql://user:password@localhost:5432/gridow-web"
 # JWT 签名密钥 (建议随机生成: openssl rand -base64 32)
 JWT_SECRET=""
 
+# 雪花算法 Worker ID (0~1023，多实例部署时确保各实例 ID 不重复)
+SNOWFLAKE_WORKER_ID="0"
+
 # 监听地址 (可选，默认 0.0.0.0:8080)
 # LISTEN_ADDR="0.0.0.0:8080"
 

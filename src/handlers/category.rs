@@ -1,173 +1,103 @@
 use axum::extract::{Path, State};
 use axum::Json;
-use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::models::category::*;
 use crate::models::error::AppError;
 use crate::state::AppState;
 
-/// 获取当前用户的分类列表
-///
-/// 若用户尚无分类，自动创建默认分类集合并返回。
-/// 排序规则：12小时内创建的最前 → 物品最多的 → 最近使用的 → 创建最晚的 → 无物品的
+async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
+    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
+        .bind(public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
+    Ok(id)
+}
+
 pub async fn list_categories(
-    State(state): State<AppState>,
-    auth: AuthUser,
+    State(state): State<AppState>, auth: AuthUser,
 ) -> Result<Json<Vec<Category>>, AppError> {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+
     let categories = sqlx::query_as::<_, Category>(
-        r#"SELECT c.*,
-                  COALESCE(COUNT(i.id), 0) AS item_count,
-                  MAX(i.updated_at) AS last_used_at
-           FROM categories c
-           LEFT JOIN items i ON i.category = c.id AND i.owner_id = $1
-           WHERE c.owner_id = $1
-           GROUP BY c.id
-           ORDER BY
-                CASE WHEN c.created_at::timestamp >= (NOW() - INTERVAL '12 hours') THEN 0 ELSE 1 END,
-                COUNT(i.id) DESC,
-                MAX(i.updated_at) DESC NULLS LAST,
-                c.created_at DESC"#,
-    )
-        .bind(&auth.user_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+        r#"SELECT c.*, COALESCE(COUNT(i.id), 0) AS item_count, MAX(i.updated_at) AS last_used_at
+           FROM categories c LEFT JOIN items i ON i.category = c.id AND i.owner_id = $1
+           WHERE c.owner_id = $1 GROUP BY c.id
+           ORDER BY CASE WHEN c.created_at::timestamp >= (NOW() - INTERVAL '12 hours') THEN 0 ELSE 1 END,
+                    COUNT(i.id) DESC, MAX(i.updated_at) DESC NULLS LAST, c.created_at DESC"#,
+    ).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     if categories.is_empty() {
-        let defaults = vec![
-            ("日用品", "🧴"),
-            ("食品", "🍎"),
-            ("工具", "🔧"),
-            ("药品", "💊"),
-            ("服装", "👕"),
-            ("电子", "🔌"),
-        ];
-        let now = chrono::Utc::now()
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-
+        let defaults = vec![("日用品", "🧴"), ("食品", "🍎"), ("工具", "🔧"), ("药品", "💊"), ("服装", "👕"), ("电子", "🔌")];
+        let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
         let mut created = Vec::new();
         for (i, (name, icon)) in defaults.iter().enumerate() {
-            let id = uuid::Uuid::new_v4().to_string();
+            let (id, public_id) = state.new_id();
             let cat = sqlx::query_as::<_, Category>(
-                r#"INSERT INTO categories (id, name, icon, sort_order, owner_id, created_at)
-                   VALUES ($1, $2, $3, $4, $5, $6)
-                   RETURNING *"#,
-            )
-                .bind(&id)
-                .bind(name)
-                .bind(icon)
-                .bind(i as i32)
-                .bind(&auth.user_id)
-                .bind(&now)
-                .fetch_one(&state.db)
-                .await
-                .map_err(AppError::Database)?;
+                r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
+            ).bind(id).bind(&public_id).bind(name).bind(icon).bind(i as i32).bind(user_internal).bind(&now)
+            .fetch_one(&state.db).await.map_err(AppError::Database)?;
             created.push(cat);
         }
-
         return Ok(Json(created));
     }
 
     Ok(Json(categories))
 }
 
-/// 创建分类
 pub async fn create_category(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(req): Json<CategoryCreateRequest>,
+    State(state): State<AppState>, auth: AuthUser, Json(req): Json<CategoryCreateRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Category>), AppError> {
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now()
-        .naive_utc()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let (id, public_id) = state.new_id();
+    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let next_order: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories WHERE owner_id = $1"
-    )
-        .bind(&auth.user_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+    ).bind(user_internal).fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     let category = sqlx::query_as::<_, Category>(
-        r#"INSERT INTO categories (id, name, icon, sort_order, owner_id, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING *"#,
-    )
-        .bind(&id)
-        .bind(&req.name)
-        .bind(&req.icon)
-        .bind(next_order)
-        .bind(&auth.user_id)
-        .bind(&now)
-        .fetch_one(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+        r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
+    ).bind(id).bind(&public_id).bind(&req.name).bind(&req.icon).bind(next_order).bind(user_internal).bind(&now)
+    .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok((axum::http::StatusCode::CREATED, Json(category)))
 }
 
-/// 更新分类
 pub async fn update_category(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(category_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(cat_public_id): Path<String>,
     Json(req): Json<CategoryUpdateRequest>,
 ) -> Result<Json<Category>, AppError> {
-    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE id = $1")
-        .bind(&category_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1")
+        .bind(&cat_public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    if existing.owner_id != auth.user_id {
-        return Err(AppError::Forbidden);
-    }
+    if existing.owner_id != user_internal { return Err(AppError::Forbidden); }
 
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
 
     let category = sqlx::query_as::<_, Category>(
         "UPDATE categories SET name = $1, icon = $2 WHERE id = $3 RETURNING *"
-    )
-        .bind(&name)
-        .bind(&icon)
-        .bind(&category_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+    ).bind(&name).bind(&icon).bind(existing.id).fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(category))
 }
 
-/// 删除分类
 pub async fn delete_category(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(category_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(cat_public_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE id = $1")
-        .bind(&category_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1")
+        .bind(&cat_public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    if existing.owner_id != auth.user_id {
-        return Err(AppError::Forbidden);
-    }
+    if existing.owner_id != user_internal { return Err(AppError::Forbidden); }
 
     sqlx::query("DELETE FROM categories WHERE id = $1")
-        .bind(&category_id)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+        .bind(existing.id).execute(&state.db).await.map_err(AppError::Database)?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

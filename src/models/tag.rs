@@ -2,9 +2,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Tag {
-    pub id: String,
+    #[serde(skip)]
+    pub id: i64,
+    #[serde(rename = "id")]
+    pub public_id: String,
     pub name: String,
-    pub owner_id: String,
+    #[serde(skip)]
+    pub owner_id: i64,
     pub created_at: String,
 }
 

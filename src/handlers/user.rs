@@ -1,10 +1,3 @@
-//! 用户管理处理器
-//!
-//! 提供注册、登录、登出、信息查询/更新、VIP 升级功能。
-//! * 密码使用 bcrypt 哈希存储，登录时验证
-//! * 登录成功后返回 JWT Token（有效期 7 天）
-//! * 注册/登录/登出 为公开接口，其余接口（目前）无强制认证
-
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json as AxumJson};
@@ -13,22 +6,28 @@ use chrono::Utc;
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use serde_json::json;
 
+use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::models::user::{
-    new_user_id, UpgradeVIPRequest, UpgradeVIPResponse, User, UserInfo, UserLoginRequest,
+    UpgradeVIPRequest, UpgradeVIPResponse, User, UserInfo, UserLoginRequest,
     UserLoginResponse, UserRegisterRequest, UserUpdateRequest,
 };
 use crate::state::AppState;
 
-/// 用户注册
-///
-/// 校验邮箱唯一性后，使用 bcrypt 哈希密码并写入数据库。
-/// 返回注册成功的用户信息（不含密码）。
+async fn resolve_internal_user_id(state: &AppState, public_id: &str) -> Result<i64, AppError> {
+    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
+        .bind(public_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or(AppError::NotFound)?;
+    Ok(id)
+}
+
 pub async fn register_user(
     State(state): State<AppState>,
     Json(req): Json<UserRegisterRequest>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
-    // 检查邮箱是否已被注册
     let exists: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_one(&state.db)
@@ -39,18 +38,18 @@ pub async fn register_user(
         return Err(AppError::BadRequest("邮箱已被注册".to_string()));
     }
 
-    // bcrypt 哈希密码（cost=12）
     let password_hash = hash(&req.password, DEFAULT_COST)
         .map_err(|_| AppError::Internal("密码加密失败".to_string()))?;
 
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let user_id = new_user_id();
+    let (id, public_id) = state.new_id();
 
     sqlx::query(
-        r#"INSERT INTO users (id, username, email, password_hash, avatar, role, status, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, 'user', 'active', $6, $7)"#,
+        r#"INSERT INTO users (id, public_id, username, email, password_hash, avatar, role, status, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, 'user', 'active', $7, $8)"#,
     )
-    .bind(&user_id)
+    .bind(id)
+    .bind(&public_id)
     .bind(&req.username)
     .bind(&req.email)
     .bind(&password_hash)
@@ -62,7 +61,7 @@ pub async fn register_user(
     .map_err(AppError::Database)?;
 
     Ok(AxumJson(UserInfo {
-        id: user_id,
+        id: public_id,
         username: req.username,
         email: req.email,
         avatar: req.avatar,
@@ -72,10 +71,6 @@ pub async fn register_user(
     }))
 }
 
-/// 用户登录
-///
-/// 验证邮箱和密码，返回用户信息与 JWT Token（Bearer 格式，7 天有效）。
-/// 已禁用账户（status != "active"）无法登录。
 pub async fn login_user(
     State(state): State<AppState>,
     Json(req): Json<UserLoginRequest>,
@@ -87,23 +82,21 @@ pub async fn login_user(
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
-    // 校验密码
     if !verify(&req.password, &user.password_hash)
         .map_err(|_| AppError::Internal("密码验证失败".to_string()))?
     {
         return Err(AppError::BadRequest("邮箱或密码错误".to_string()));
     }
 
-    // 检查账户状态
     if user.status != "active" {
         return Err(AppError::Forbidden);
     }
 
-    let token = generate_token(&user.id, &state.jwt_secret).await?;
+    let token = generate_token(&user.public_id, &state.jwt_secret).await?;
 
     Ok(AxumJson(UserLoginResponse {
         user: UserInfo {
-            id: user.id,
+            id: user.public_id,
             username: user.username,
             email: user.email,
             avatar: user.avatar,
@@ -115,27 +108,23 @@ pub async fn login_user(
     }))
 }
 
-/// 用户登出
-///
-/// 当前为无状态实现，客户端只需丢弃 Token 即可。
 pub async fn logout_user() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
 
-/// 获取用户信息
 pub async fn get_user_info(
     State(state): State<AppState>,
-    Path(user_id): Path<String>,
+    Path(user_public_id): Path<String>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(&user_id)
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE public_id = $1")
+        .bind(&user_public_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
 
     Ok(AxumJson(UserInfo {
-        id: user.id,
+        id: user.public_id,
         username: user.username,
         email: user.email,
         avatar: user.avatar,
@@ -145,20 +134,23 @@ pub async fn get_user_info(
     }))
 }
 
-/// 更新用户信息
-///
-/// 当前仅允许修改 username 和 avatar。
 pub async fn update_user(
     State(state): State<AppState>,
-    Path(user_id): Path<String>,
+    auth: AuthUser,
+    Path(user_public_id): Path<String>,
     Json(req): Json<UserUpdateRequest>,
 ) -> Result<AxumJson<UserInfo>, AppError> {
-    let mut user: User = sqlx::query_as("SELECT * FROM users WHERE id = $1")
-        .bind(&user_id)
+    let mut user: User = sqlx::query_as("SELECT * FROM users WHERE public_id = $1")
+        .bind(&user_public_id)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
         .ok_or(AppError::NotFound)?;
+
+    let auth_internal_id = resolve_internal_user_id(&state, &auth.public_id).await?;
+    if user.id != auth_internal_id {
+        return Err(AppError::Forbidden);
+    }
 
     if let Some(username) = req.username {
         user.username = username;
@@ -169,19 +161,17 @@ pub async fn update_user(
 
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-    sqlx::query(
-        r#"UPDATE users SET username=$1, avatar=$2, updated_at=$3 WHERE id=$4"#,
-    )
-    .bind(&user.username)
-    .bind(&user.avatar)
-    .bind(&now)
-    .bind(&user_id)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    sqlx::query("UPDATE users SET username=$1, avatar=$2, updated_at=$3 WHERE id=$4")
+        .bind(&user.username)
+        .bind(&user.avatar)
+        .bind(&now)
+        .bind(user.id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Database)?;
 
     Ok(AxumJson(UserInfo {
-        id: user.id,
+        id: user.public_id,
         username: user.username,
         email: user.email,
         avatar: user.avatar,
@@ -191,12 +181,9 @@ pub async fn update_user(
     }))
 }
 
-/// 升级 VIP
-///
-/// 支持的会员计划：`vip`、`vip_plus`。
 pub async fn upgrade_vip(
     State(state): State<AppState>,
-    Path(user_id): Path<String>,
+    Path(user_public_id): Path<String>,
     Json(req): Json<UpgradeVIPRequest>,
 ) -> Result<AxumJson<UpgradeVIPResponse>, AppError> {
     let plan = req.plan.to_lowercase();
@@ -208,10 +195,17 @@ pub async fn upgrade_vip(
 
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-    sqlx::query(r#"UPDATE users SET role=$1, updated_at=$2 WHERE id=$3"#)
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE public_id = $1")
+        .bind(&user_public_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or(AppError::NotFound)?;
+
+    sqlx::query("UPDATE users SET role=$1, updated_at=$2 WHERE id=$3")
         .bind(new_role)
         .bind(&now)
-        .bind(&user_id)
+        .bind(user.id)
         .execute(&state.db)
         .await
         .map_err(AppError::Database)?;
@@ -223,12 +217,9 @@ pub async fn upgrade_vip(
     }))
 }
 
-/// 生成 JWT Token
-///
-/// 使用 HMAC-SHA256 算法，载荷包含 `user_id` 和过期时间（7 天）。
-async fn generate_token(user_id: &str, secret: &str) -> Result<String, AppError> {
+async fn generate_token(public_id: &str, secret: &str) -> Result<String, AppError> {
     let payload = json!({
-        "user_id": user_id,
+        "public_id": public_id,
         "exp": Utc::now().timestamp() + 86400 * 7
     });
 

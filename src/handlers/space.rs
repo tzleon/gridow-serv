@@ -1,21 +1,7 @@
-//! 空间管理处理器
-//!
-//! 提供空间（Space）的树形结构管理：
-//! * 增删改查（含按父节点筛选的子空间列表）
-//! * 空间树（返回当前用户授权的完整嵌套结构）
-//! * 子空间 / 空间下物品 / 空间路径查询
-//!
-//! # 权限模型
-//! * **查询** — 仅返回当前用户拥有或协管的空间
-//! * **修改** — owner 或协管可操作
-//! * **删除** — 仅 owner 可操作（递归删除子空间，释放关联物品）
-//! * **创建** — 任何已登录用户可创建
-
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::models::error::AppError;
@@ -23,433 +9,277 @@ use crate::models::item::Item;
 use crate::models::space::*;
 use crate::state::AppState;
 
-/// 权限校验：检查用户是否为实体的 owner 或协管
-async fn check_access(pool: &PgPool, user_id: &str, entity_type: &str, entity_id: &str, owner_id: &str) -> Result<(), AppError> {
-    if owner_id == user_id {
-        return Ok(());
-    }
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
-    )
-    .bind(entity_type)
-    .bind(entity_id)
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::Database)?;
-
-    if count > 0 {
-        return Ok(());
-    }
-    Err(AppError::Forbidden)
+async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
+    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
+        .bind(public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
+    Ok(id)
 }
 
-/// 获取空间列表
-///
-/// 可通过 `parentId` 过滤指定父节点下的子空间；
-/// 不传则返回顶级空间。
+async fn resolve_space_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
+    let (id,): (i64,) = sqlx::query_as("SELECT id FROM spaces WHERE public_id = $1")
+        .bind(public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
+    Ok(id)
+}
+
+async fn check_access(pool: &PgPool, user_internal: i64, entity_type: &str, entity_internal: i64, owner_internal: i64) -> Result<(), AppError> {
+    if owner_internal == user_internal { return Ok(()); }
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
+    ).bind(entity_type).bind(entity_internal).bind(user_internal)
+    .fetch_one(pool).await.map_err(AppError::Database)?;
+    if count > 0 { Ok(()) } else { Err(AppError::Forbidden) }
+}
+
 pub async fn list_spaces(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Query(params): Query<SpaceListParams>,
+    State(state): State<AppState>, auth: AuthUser, Query(params): Query<SpaceListParams>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let spaces = if let Some(ref parent_id) = params.parent_id {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+
+    let spaces = if let Some(ref parent_pid) = params.parent_id {
+        let parent_internal = resolve_space_internal(&state, parent_pid).await?;
         sqlx::query_as::<_, Space>(
-            "SELECT * FROM spaces \
-             WHERE parent_id = $1 \
-             AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3)) \
-             ORDER BY sort_order, name"
-        )
-            .bind(parent_id)
-            .bind(&auth.user_id)
-            .bind(&auth.user_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
+            "SELECT * FROM spaces WHERE parent_id = $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3)) ORDER BY sort_order, name"
+        ).bind(parent_internal).bind(user_internal).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?
     } else {
         sqlx::query_as::<_, Space>(
-            "SELECT * FROM spaces \
-             WHERE parent_id IS NULL \
-             AND (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) \
-             ORDER BY sort_order, name"
-        )
-            .bind(&auth.user_id)
-            .bind(&auth.user_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
+            "SELECT * FROM spaces WHERE parent_id IS NULL AND (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) ORDER BY sort_order, name"
+        ).bind(user_internal).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?
     };
 
     Ok(Json(spaces))
 }
 
-/// 创建空间
-///
-/// 若指定了父空间，则自动计算深度（parent.depth + 1）。
-/// owner 设置为当前登录用户。
 pub async fn create_space(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(req): Json<SpaceCreateRequest>,
+    State(state): State<AppState>, auth: AuthUser, Json(req): Json<SpaceCreateRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Space>), AppError> {
-    let id = Uuid::new_v4().to_string();
-    let now = chrono::Utc::now()
-        .naive_utc()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let (id, public_id) = state.new_id();
+    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let (depth, parent_id) = if let Some(ref pid) = req.parent_id {
+    let (depth, parent_internal) = if let Some(ref pid) = req.parent_id {
+        let pi = resolve_space_internal(&state, pid).await?;
         let parent: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
-            .bind(pid)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(AppError::Database)?
-            .ok_or(AppError::BadRequest("父空间不存在".to_string()))?;
-        (parent.depth + 1, Some(pid.clone()))
-    } else {
-        (0, None)
-    };
+            .bind(pi).fetch_optional(&state.db).await
+            .map_err(AppError::Database)?.ok_or(AppError::BadRequest("父空间不存在".to_string()))?;
+        (parent.depth + 1, Some(pi))
+    } else { (0, None) };
 
     let space = sqlx::query_as::<_, Space>(
-        r#"INSERT INTO spaces (id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
-           VALUES ($1, $2, $3, 0, $4, $5, 0, $6, $7, $8, $9)
-           RETURNING *"#,
+        r#"INSERT INTO spaces (id, public_id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, 0, $5, $6, 0, $7, $8, $9, $10) RETURNING *"#,
     )
-    .bind(&id)
-    .bind(&req.name)
-    .bind(&req.icon)
-    .bind(&parent_id)
-    .bind(depth)
-    .bind(&req.photo_uri)
-    .bind(&auth.user_id)
-    .bind(&now)
-    .bind(&now)
-    .fetch_one(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    .bind(id).bind(&public_id).bind(&req.name).bind(&req.icon)
+    .bind(parent_internal).bind(depth).bind(&req.photo_uri)
+    .bind(user_internal).bind(&now).bind(&now)
+    .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok((axum::http::StatusCode::CREATED, Json(space)))
 }
 
-/// 获取单个空间详情
 pub async fn get_space(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(space_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<Space>, AppError> {
-    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
-        .bind(&space_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE public_id = $1")
+        .bind(&space_public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
-
+    check_access(&state.db, user_internal, "space", space.id, space.owner_id).await?;
     Ok(Json(space))
 }
 
-/// 更新空间
 pub async fn update_space(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(space_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
     Json(req): Json<SpaceUpdateRequest>,
 ) -> Result<Json<Space>, AppError> {
-    let existing = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
-        .bind(&space_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let existing = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE public_id = $1")
+        .bind(&space_public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, &auth.user_id, "space", &space_id, &existing.owner_id).await?;
+    check_access(&state.db, user_internal, "space", existing.id, existing.owner_id).await?;
 
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
     let photo_uri = req.photo_uri.unwrap_or(existing.photo_uri);
     let sort_order = req.sort_order.unwrap_or(existing.sort_order);
-    let now = chrono::Utc::now()
-        .naive_utc()
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let space = sqlx::query_as::<_, Space>(
         "UPDATE spaces SET name=$1, icon=$2, photo_uri=$3, sort_order=$4, updated_at=$5 WHERE id=$6 RETURNING *",
     )
-    .bind(&name)
-    .bind(&icon)
-    .bind(&photo_uri)
-    .bind(sort_order)
-    .bind(&now)
-    .bind(&space_id)
-    .fetch_one(&state.db)
-    .await
-    .map_err(AppError::Database)?;
+    .bind(&name).bind(&icon).bind(&photo_uri).bind(sort_order).bind(&now).bind(existing.id)
+    .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(space))
 }
 
-/// 删除空间（仅 owner 可操作）
-///
-/// 递归删除所有子空间，并将关联物品的 `location_id` 置空。
-/// 同时清理协管关系。
 pub async fn delete_space(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(space_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
-        .bind(&space_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE public_id = $1")
+        .bind(&space_public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    if space.owner_id != auth.user_id {
-        return Err(AppError::Forbidden);
-    }
+    if space.owner_id != user_internal { return Err(AppError::Forbidden); }
 
-    delete_space_recursive(&state, &space_id).await?;
-
+    delete_space_recursive(&state, space.id).await?;
     sqlx::query("DELETE FROM collaborators WHERE entity_type = 'space' AND entity_id = $1")
-        .bind(&space_id)
-        .execute(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+        .bind(space.id).execute(&state.db).await.map_err(AppError::Database)?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
-/// 递归删除空间树（栈式后序遍历，避免递归栈溢出）
-async fn delete_space_recursive(state: &AppState, space_id: &str) -> Result<(), AppError> {
-    let mut stack = vec![space_id.to_string()];
-
+async fn delete_space_recursive(state: &AppState, space_internal: i64) -> Result<(), AppError> {
+    let mut stack = vec![space_internal];
     while let Some(current_id) = stack.pop() {
-        // 收集子空间入栈
-        let children: Vec<Space> =
-            sqlx::query_as("SELECT * FROM spaces WHERE parent_id = $1")
-                .bind(&current_id)
-                .fetch_all(&state.db)
-                .await
-                .map_err(AppError::Database)?;
+        let children: Vec<Space> = sqlx::query_as("SELECT * FROM spaces WHERE parent_id = $1")
+            .bind(current_id).fetch_all(&state.db).await.map_err(AppError::Database)?;
+        for child in children { stack.push(child.id); }
 
-        for child in children {
-            stack.push(child.id);
-        }
-
-        // 释放关联物品
         sqlx::query("UPDATE items SET location_id=NULL, location='' WHERE location_id = $1")
-            .bind(&current_id)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::Database)?;
-
-        // 删除空间自身
+            .bind(current_id).execute(&state.db).await.map_err(AppError::Database)?;
         sqlx::query("DELETE FROM spaces WHERE id = $1")
-            .bind(&current_id)
-            .execute(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+            .bind(current_id).execute(&state.db).await.map_err(AppError::Database)?;
     }
-
     Ok(())
 }
 
-/// 获取空间树
-///
-/// 返回当前用户授权的所有空间构成的树形结构（递归嵌套）。
-/// 每个节点附带了直接关联的物品 ID 列表。
 pub async fn get_space_tree(
-    State(state): State<AppState>,
-    auth: AuthUser,
+    State(state): State<AppState>, auth: AuthUser,
 ) -> Result<Json<Vec<SpaceNode>>, AppError> {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+
     let all_spaces: Vec<Space> = sqlx::query_as::<_, Space>(
         "SELECT * FROM spaces WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) ORDER BY sort_order, name"
-    )
-        .bind(&auth.user_id)
-        .bind(&auth.user_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+    ).bind(user_internal).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
-    // 批量查询所有空间的物品关联
-    let owner_ids: Vec<String> = all_spaces.iter().map(|s| s.id.clone()).collect();
-    let item_locations: Vec<(String, Option<String>)> = if owner_ids.is_empty() {
-        vec![]
-    } else {
-        let mut query_builder = sqlx::QueryBuilder::new(
-            "SELECT id, location_id FROM items WHERE location_id IN ("
-        );
-        let mut separated = query_builder.separated(", ");
-        for oid in &owner_ids {
-            separated.push_bind(oid);
-        }
-        separated.push_unseparated(")");
-
-        query_builder
-            .build_query_as()
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?
+    let space_internals: Vec<i64> = all_spaces.iter().map(|s| s.id).collect();
+    let item_locations: Vec<(i64, Option<i64>)> = if space_internals.is_empty() { vec![] } else {
+        let mut qb = sqlx::QueryBuilder::new("SELECT id, location_id FROM items WHERE location_id IN (");
+        let mut sep = qb.separated(", ");
+        for sid in &space_internals { sep.push_bind(sid); }
+        sep.push_unseparated(")");
+        qb.build_query_as().fetch_all(&state.db).await.map_err(AppError::Database)?
     };
 
-    let mut item_id_map: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
-    for (item_id, location_id) in item_locations {
-        if let Some(loc_id) = location_id {
-            item_id_map.entry(loc_id).or_default().push(item_id);
+    let public_id_map: std::collections::HashMap<i64, String> = all_spaces.iter().map(|s| (s.id, s.public_id.clone())).collect();
+    let item_public_map: std::collections::HashMap<i64, String> = {
+        let items: Vec<(i64, String)> = sqlx::query_as("SELECT id, public_id FROM items").fetch_all(&state.db).await.unwrap_or_default();
+        items.into_iter().collect()
+    };
+
+    let mut item_id_map: std::collections::HashMap<i64, Vec<String>> = std::collections::HashMap::new();
+    for (item_internal, loc_internal) in item_locations {
+        if let Some(li) = loc_internal {
+            if let Some(pid) = item_public_map.get(&item_internal) {
+                item_id_map.entry(li).or_default().push(pid.clone());
+            }
         }
     }
 
-    let root_nodes = build_space_tree(&all_spaces, None, &item_id_map);
+    let root_nodes = build_space_tree(&all_spaces, None, &item_id_map, &public_id_map);
     Ok(Json(root_nodes))
 }
 
-/// 递归构建空间树
-///
-/// `parent_id == None` 匹配顶级节点，`Some(pid)` 匹配指定父节点的子节点。
 fn build_space_tree(
-    spaces: &[Space],
-    parent_id: Option<&str>,
-    item_id_map: &std::collections::HashMap<String, Vec<String>>,
+    spaces: &[Space], parent_id: Option<i64>,
+    item_id_map: &std::collections::HashMap<i64, Vec<String>>,
+    public_id_map: &std::collections::HashMap<i64, String>,
 ) -> Vec<SpaceNode> {
     let mut nodes = Vec::new();
-
     for space in spaces {
-        let is_child = match (parent_id, &space.parent_id) {
-            (None, None) => true,
-            (Some(pid), Some(spid)) => pid == spid,
-            _ => false,
+        let is_child = match (parent_id, space.parent_id) {
+            (None, None) => true, (Some(pid), Some(spid)) => pid == spid, _ => false,
         };
-
         if is_child {
-            let children = build_space_tree(spaces, Some(&space.id), item_id_map);
+            let children = build_space_tree(spaces, Some(space.id), item_id_map, public_id_map);
             let item_ids = item_id_map.get(&space.id).cloned().unwrap_or_default();
-
-            let node = SpaceNode {
-                id: space.id.clone(),
+            nodes.push(SpaceNode {
+                id: space.public_id.clone(),
                 name: space.name.clone(),
                 icon: space.icon.clone(),
                 count: space.count,
-                parent_id: space.parent_id.clone(),
+                parent_id: space.parent_id.and_then(|pid| public_id_map.get(&pid).cloned()),
                 depth: space.depth,
                 photo_uri: space.photo_uri.clone(),
                 children,
                 item_ids,
-                owner_id: space.owner_id.clone(),
-            };
-            nodes.push(node);
+                owner_id: public_id_map.get(&space.owner_id).cloned().unwrap_or_default(),
+            });
         }
     }
-
     nodes
 }
 
-/// 获取空间的直接子空间列表
 pub async fn get_space_children(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(space_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<Vec<Space>>, AppError> {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let space_internal = resolve_space_internal(&state, &space_public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
-        .bind(&space_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+        .bind(space_internal).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
+    check_access(&state.db, user_internal, "space", space_internal, space.owner_id).await?;
 
-    let children =
-        sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
-            .bind(&space_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(AppError::Database)?;
+    let children = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
+        .bind(space_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(children))
 }
 
-/// 获取空间下的物品列表
 pub async fn get_space_items(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(space_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<Vec<Item>>, AppError> {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let space_internal = resolve_space_internal(&state, &space_public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
-        .bind(&space_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+        .bind(space_internal).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
+    check_access(&state.db, user_internal, "space", space_internal, space.owner_id).await?;
 
     let items = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE location_id = $1")
-        .bind(&space_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(AppError::Database)?;
+        .bind(space_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(items))
 }
 
-/// 获取空间路径（从根到当前空间的完整路径）
 pub async fn get_space_path(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Path(space_id): Path<String>,
+    State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<SpacePathResponse>, AppError> {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let space_internal = resolve_space_internal(&state, &space_public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
-        .bind(&space_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+        .bind(space_internal).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, &auth.user_id, "space", &space_id, &space.owner_id).await?;
+    check_access(&state.db, user_internal, "space", space_internal, space.owner_id).await?;
 
-    let segments = get_space_path_segments(&state.db, &space_id).await?;
-
-    let path = segments
-        .iter()
-        .map(|s| format!("{} {}", s.icon, s.name))
-        .collect::<Vec<_>>()
-        .join(" > ");
+    let segments = get_space_path_segments(&state.db, space_internal).await?;
+    let path = segments.iter().map(|s| format!("{} {}", s.icon, s.name)).collect::<Vec<_>>().join(" > ");
 
     Ok(Json(SpacePathResponse { path, segments }))
 }
 
-/// 查询空间路径段（从根向上追溯，不含权限校验）
-pub async fn get_space_path_segments(
-    pool: &PgPool,
-    space_id: &str,
-) -> Result<Vec<SpacePathSegment>, AppError> {
+pub async fn get_space_path_segments(pool: &PgPool, space_internal: i64) -> Result<Vec<SpacePathSegment>, AppError> {
     let mut segments = Vec::new();
-    let mut current_id = Some(space_id.to_string());
-
+    let mut current_id = Some(space_internal);
     while let Some(id) = current_id {
         let space: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
-            .bind(&id)
-            .fetch_optional(pool)
-            .await
-            .map_err(AppError::Database)?
-            .ok_or(AppError::NotFound)?;
+            .bind(id).fetch_optional(pool).await
+            .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-        segments.push(SpacePathSegment {
-            id: space.id.clone(),
-            name: space.name.clone(),
-            icon: space.icon.clone(),
-        });
-
+        segments.push(SpacePathSegment { id: space.public_id, name: space.name.clone(), icon: space.icon.clone() });
         current_id = space.parent_id;
     }
-
     segments.reverse();
     Ok(segments)
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SpaceListParams {
-    parent_id: Option<String>,
-}
+pub struct SpaceListParams { pub parent_id: Option<String> }

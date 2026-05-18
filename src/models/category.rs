@@ -2,11 +2,15 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Category {
-    pub id: String,
+    #[serde(skip)]
+    pub id: i64,
+    #[serde(rename = "id")]
+    pub public_id: String,
     pub name: String,
     pub icon: String,
     pub sort_order: i32,
-    pub owner_id: String,
+    #[serde(skip)]
+    pub owner_id: i64,
     pub created_at: String,
     #[sqlx(default)]
     #[serde(default)]
@@ -29,6 +33,4 @@ pub struct CategoryUpdateRequest {
     pub icon: Option<String>,
 }
 
-fn default_icon() -> String {
-    "📦".to_string()
-}
+fn default_icon() -> String { "📦".to_string() }

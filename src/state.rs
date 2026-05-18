@@ -1,47 +1,44 @@
 //! 应用全局状态与数据库初始化
 //!
-//! * `AppState` — 所有 Handler 共享的状态（数据库连接池、上传目录、JWT 密钥）
+//! * `AppState` — 所有 Handler 共享的状态（数据库连接池、上传目录、JWT 密钥、雪花生成器）
 //! * `init_database` — 建表 + 索引，幂等执行（`IF NOT EXISTS`）
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
+use std::sync::Arc;
 use std::time::Duration;
 
+use md5::Digest;
+use crate::snowflake::Snowflake;
+
 /// 应用全局共享状态
-///
-/// 通过 `axum::extract::State` 注入到每个 Handler 中。
-/// 实现了 `Clone`，因为 Axum 会为每个工作线程复制一份引用。
 #[derive(Clone)]
 pub struct AppState {
-    /// PostgreSQL 连接池（sqlx::PgPool 内部使用 Arc，clone 成本极低）
     pub db: PgPool,
-    /// 图片上传目录的绝对路径
     pub upload_dir: String,
-    /// JWT HMAC-SHA256 签名密钥
     pub jwt_secret: String,
-    /// 服务器基础 URL（用于生成完整图片 URL）
     pub base_url: String,
+    pub snowflake: Arc<Snowflake>,
 }
 
 impl AppState {
-    pub fn new(db: PgPool, upload_dir: String, jwt_secret: String, base_url: String) -> Self {
-        Self { db, upload_dir, jwt_secret, base_url }
+    pub fn new(db: PgPool, upload_dir: String, jwt_secret: String, base_url: String, snowflake: Snowflake) -> Self {
+        Self { db, upload_dir, jwt_secret, base_url, snowflake: Arc::new(snowflake) }
+    }
+
+    /// 生成雪花 ID + public_id（MD5 哈希）
+    pub fn new_id(&self) -> (i64, String) {
+        let id = self.snowflake.generate();
+        let digest = md5::Md5::digest(id.to_string().as_bytes());
+        let public_id = format!("{:x}", digest);
+        (id, public_id)
+    }
+
+    /// 仅生成 public_id（内部已包含雪花 ID 生成）
+    pub fn new_public_id(&self) -> String {
+        self.new_id().1
     }
 }
 
-/// 初始化数据库：建立连接池，自动建表与索引
-///
-/// 使用 `PgPoolOptions` 显式配置连接池参数，避免默认超时过短导致 `PoolTimedOut`。
-/// 所有 DDL 均使用 `IF NOT EXISTS`，多次调用安全。
-///
-/// # 连接池配置
-/// * `max_connections` = 10（PostgreSQL 默认最大 100，预留余量）
-/// * `acquire_timeout` = 10s（从池中获取连接的最大等待时间，超过则报 `PoolTimedOut`）
-/// * `idle_timeout` = 300s（空闲连接超过此时间将被回收）
-///
-/// # 常见连接失败原因
-/// * `DATABASE_URL` 格式错误（密码含特殊字符需 URL 编码，如 `@` -> `%40`）
-/// * 防火墙 / 安全组未放行 PostgreSQL 端口（默认 5432）
-/// * PostgreSQL 未监听外部连接（检查 `listen_addresses` 和 `pg_hba.conf`）
 pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     tracing::info!("Connecting to database...");
 
@@ -54,11 +51,11 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
 
     tracing::info!("Database connected, running migrations...");
 
-    // ── 用户表 ──────────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS users (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             username VARCHAR NOT NULL,
             email VARCHAR NOT NULL UNIQUE,
             password_hash VARCHAR NOT NULL,
@@ -73,16 +70,16 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 物品表 ──────────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS items (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             name VARCHAR NOT NULL,
             icon VARCHAR NOT NULL DEFAULT '📦',
             qty INT NOT NULL DEFAULT 0,
             location VARCHAR NOT NULL DEFAULT '',
-            location_id VARCHAR,
+            location_id BIGINT,
             category VARCHAR NOT NULL DEFAULT 'daily',
             tags VARCHAR NOT NULL DEFAULT '[]',
             barcode VARCHAR NOT NULL DEFAULT '',
@@ -92,7 +89,7 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             expiry VARCHAR NOT NULL DEFAULT '-',
             remark VARCHAR NOT NULL DEFAULT '',
             track_low_stock BOOLEAN NOT NULL DEFAULT FALSE,
-            owner_id VARCHAR NOT NULL DEFAULT '',
+            owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL,
             updated_at VARCHAR NOT NULL
         )
@@ -101,19 +98,19 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 空间表 ──────────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS spaces (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             name VARCHAR NOT NULL,
             icon VARCHAR NOT NULL DEFAULT '🏠',
             count INT NOT NULL DEFAULT 0,
-            parent_id VARCHAR,
+            parent_id BIGINT,
             depth INT NOT NULL DEFAULT 0,
             sort_order INT NOT NULL DEFAULT 0,
             photo_uri VARCHAR NOT NULL DEFAULT '',
-            owner_id VARCHAR NOT NULL DEFAULT '',
+            owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL,
             updated_at VARCHAR NOT NULL
         )
@@ -122,14 +119,14 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 协管关系表 ──────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS collaborators (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             entity_type VARCHAR NOT NULL,
-            entity_id VARCHAR NOT NULL,
-            user_id VARCHAR NOT NULL,
+            entity_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
             created_at VARCHAR NOT NULL,
             CONSTRAINT uq_collaborator UNIQUE (entity_type, entity_id, user_id)
         )
@@ -138,13 +135,13 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 操作历史表 ──────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS history (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             type VARCHAR NOT NULL,
-            item_id VARCHAR NOT NULL,
+            item_id BIGINT NOT NULL,
             item_name VARCHAR NOT NULL,
             qty INT NOT NULL,
             from_location VARCHAR,
@@ -158,15 +155,15 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 分类表 ──────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS categories (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             name VARCHAR NOT NULL,
             icon VARCHAR NOT NULL DEFAULT '📦',
             sort_order INT NOT NULL DEFAULT 0,
-            owner_id VARCHAR NOT NULL DEFAULT '',
+            owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL
         )
         "#,
@@ -174,13 +171,13 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 标签表 ──────────────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS tags (
-            id VARCHAR PRIMARY KEY,
+            id BIGINT PRIMARY KEY,
+            public_id VARCHAR(32) UNIQUE NOT NULL,
             name VARCHAR NOT NULL,
-            owner_id VARCHAR NOT NULL DEFAULT '',
+            owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL
         )
         "#,
@@ -188,7 +185,6 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // ── 同步状态表（单行） ──────────────────────────────────
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS sync_status (
@@ -202,7 +198,6 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
-    // 确保 sync_status 始终有一行初始数据
     sqlx::query(
         r#"
         INSERT INTO sync_status (id, last_sync_time, pending_changes) 
@@ -215,53 +210,47 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
 
     // ── 业务索引 ────────────────────────────────────────────
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_users_public_id ON users(public_id)")
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_category ON items(category)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_location_id ON items(location_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_barcode ON items(barcode)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_expiry ON items(expiry)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_updated_at ON items(updated_at)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_owner_id ON items(owner_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_public_id ON items(public_id)")
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_parent_id ON spaces(parent_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_owner_id ON spaces(owner_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_public_id ON spaces(public_id)")
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_collaborators_entity ON collaborators(entity_type, entity_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_collaborators_user ON collaborators(user_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_item_id ON history(item_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_type ON history(type)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_time ON history(time)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_categories_owner_id ON categories(owner_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_categories_public_id ON categories(public_id)")
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tags_owner_id ON tags(owner_id)")
-        .execute(&pool)
-        .await?;
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tags_public_id ON tags(public_id)")
+        .execute(&pool).await?;
 
     Ok(pool)
 }

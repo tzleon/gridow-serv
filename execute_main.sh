@@ -116,10 +116,12 @@ for arg in "$@"; do
     case "$arg" in
         restart) MODE="restart" ;;
         deploy)  MODE="deploy" ;;
+        stop)    MODE="stop" ;;
         *)
-            info "用法: $0 [deploy|restart]"
+            info "用法: $0 [deploy|restart|stop]"
             info "  deploy  - 拉取代码、编译、部署（默认）"
             info "  restart - 仅重启服务（不拉代码不编译）"
+            info "  stop    - 停止服务"
             exit 0
             ;;
     esac
@@ -152,6 +154,13 @@ fi
 info "===== Gridow 自动部署开始 ====="
 info "时间: $(date '+%Y-%m-%d %H:%M:%S')"
 info "模式: ${MODE}"
+
+if [ "$MODE" = "stop" ]; then
+    info "===== 停止服务 ====="
+    stop_process
+    ok "进程已停止"
+    exit 0
+fi
 
 if [ "$MODE" = "restart" ]; then
     info "===== 仅重启服务，跳过拉代码与编译 ====="
