@@ -27,7 +27,7 @@ pub async fn list_history(
     let limit = params.limit.clamp(1, 100);
 
     let mut builder = sqlx::QueryBuilder::new(
-        "SELECT h.* FROM history h JOIN items i ON h.item_id = i.id WHERE (i.owner_id = ",
+        "SELECT h.*, i.public_id AS item_public_id FROM history h JOIN items i ON h.item_id = i.id WHERE (i.owner_id = ",
     );
     builder.push_bind(user_internal);
     builder.push(" OR i.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = ");
@@ -58,7 +58,7 @@ pub async fn get_item_history(
     }
 
     let records = sqlx::query_as::<_, HistoryRecord>(
-        "SELECT * FROM history WHERE item_id = $1 ORDER BY time DESC",
+        "SELECT h.*, i.public_id AS item_public_id FROM history h JOIN items i ON h.item_id = i.id WHERE h.item_id = $1 ORDER BY h.time DESC",
     ).bind(item_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(records))

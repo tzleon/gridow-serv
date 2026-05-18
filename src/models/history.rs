@@ -9,6 +9,8 @@ pub struct HistoryRecord {
     pub r#type: String,
     #[serde(skip)]
     pub item_id: i64,
+    #[serde(rename = "item_id")]
+    pub item_public_id: String,
     pub item_name: String,
     pub qty: i32,
     pub from_location: Option<String>,

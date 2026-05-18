@@ -39,7 +39,7 @@ pub async fn sync_pull(
         "SELECT * FROM spaces WHERE updated_at > $1 AND created_at <= $2 AND (owner_id = $3 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3))"
     ).bind(&last_sync_time).bind(&last_sync_time).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
-    let created_history: Vec<HistoryRecord> = sqlx::query_as("SELECT * FROM history WHERE time > $1")
+    let created_history: Vec<HistoryRecord> = sqlx::query_as("SELECT h.*, i.public_id AS item_public_id FROM history h JOIN items i ON h.item_id = i.id WHERE h.time > $1")
         .bind(&last_sync_time).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
