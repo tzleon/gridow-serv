@@ -11,6 +11,9 @@ pub struct Space {
     pub count: i32,
     #[serde(skip)]
     pub parent_id: Option<i64>,
+    #[serde(rename = "parent_id")]
+    #[sqlx(default)]
+    pub parent_public_id: Option<String>,
     pub depth: i32,
     pub sort_order: i32,
     pub photo_uri: String,
@@ -36,6 +39,7 @@ pub struct SpaceUpdateRequest {
     pub icon: Option<String>,
     pub photo_uri: Option<String>,
     pub sort_order: Option<i32>,
+    pub parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

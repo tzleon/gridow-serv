@@ -68,7 +68,7 @@ pub async fn create_space(
 
     let space = sqlx::query_as::<_, Space>(
         r#"INSERT INTO spaces (id, public_id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 0, $5, $6, 0, $7, $8, $9, $10) RETURNING *"#,
+           VALUES ($1, $2, $3, $4, 0, $5, $6, 0, $7, $8, $9, $10) RETURNING *, (SELECT public_id FROM spaces WHERE id = $5) AS parent_public_id"#,
     )
     .bind(id).bind(&public_id).bind(&req.name).bind(&req.icon)
     .bind(parent_internal).bind(depth).bind(&req.photo_uri)
@@ -105,12 +105,30 @@ pub async fn update_space(
     let icon = req.icon.unwrap_or(existing.icon);
     let photo_uri = req.photo_uri.unwrap_or(existing.photo_uri);
     let sort_order = req.sort_order.unwrap_or(existing.sort_order);
+
+    let (parent_internal, depth) = if let Some(ref parent_pid) = req.parent_id {
+        if parent_pid == &space_public_id {
+            return Err(AppError::BadRequest("不能将自己设为上级空间".to_string()));
+        }
+        let pi = resolve_space_internal(&state, parent_pid).await?;
+        if is_descendant(&state.db, existing.id, pi).await {
+            return Err(AppError::BadRequest("不能将子空间设为上级空间".to_string()));
+        }
+        let parent: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
+            .bind(pi).fetch_optional(&state.db).await
+            .map_err(AppError::Database)?.ok_or(AppError::BadRequest("上级空间不存在".to_string()))?;
+        check_access(&state.db, user_internal, "space", parent.id, parent.owner_id).await?;
+        (Some(pi), parent.depth + 1)
+    } else {
+        (None, 0)
+    };
+
     let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
 
     let space = sqlx::query_as::<_, Space>(
-        "UPDATE spaces SET name=$1, icon=$2, photo_uri=$3, sort_order=$4, updated_at=$5 WHERE id=$6 RETURNING *",
+        "UPDATE spaces SET name=$1, icon=$2, photo_uri=$3, sort_order=$4, parent_id=$5, depth=$6, updated_at=$7 WHERE id=$8 RETURNING *, (SELECT public_id FROM spaces WHERE id = $5) AS parent_public_id",
     )
-    .bind(&name).bind(&icon).bind(&photo_uri).bind(sort_order).bind(&now).bind(existing.id)
+    .bind(&name).bind(&icon).bind(&photo_uri).bind(sort_order).bind(parent_internal).bind(depth).bind(&now).bind(existing.id)
     .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(space))
@@ -131,6 +149,20 @@ pub async fn delete_space(
         .bind(space.id).execute(&state.db).await.map_err(AppError::Database)?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+async fn is_descendant(db: &PgPool, ancestor: i64, target: i64) -> bool {
+    if ancestor == target { return true; }
+    let mut current = target;
+    loop {
+        let row: Option<(Option<i64>,)> = sqlx::query_as("SELECT parent_id FROM spaces WHERE id = $1")
+            .bind(current).fetch_optional(db).await.unwrap_or(None);
+        match row {
+            Some((Some(pid),)) if pid == ancestor => return true,
+            Some((Some(pid),)) => current = pid,
+            _ => return false,
+        }
+    }
 }
 
 async fn delete_space_recursive(state: &AppState, space_internal: i64) -> Result<(), AppError> {
