@@ -89,12 +89,15 @@ pub async fn login_user(
     State(state): State<AppState>,
     Json(req): Json<UserLoginRequest>,
 ) -> Result<AxumJson<UserLoginResponse>, AppError> {
-    let user: User = sqlx::query_as("SELECT * FROM users WHERE email = $1")
+    let user: User = match sqlx::query_as("SELECT * FROM users WHERE email = $1")
         .bind(&req.email)
         .fetch_optional(&state.db)
         .await
         .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
+    {
+        Some(u) => u,
+        None => return Err(AppError::BadRequest("邮箱或密码错误".to_string())),
+    };
 
     if !verify(&req.password, &user.password_hash)
         .map_err(|_| AppError::Internal("密码验证失败".to_string()))?
