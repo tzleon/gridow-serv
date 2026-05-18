@@ -20,7 +20,7 @@ pub async fn list_categories(
 
     let categories = sqlx::query_as::<_, Category>(
         r#"SELECT c.*, COALESCE(COUNT(i.id), 0) AS item_count, MAX(i.updated_at) AS last_used_at
-           FROM categories c LEFT JOIN items i ON i.category = c.id AND i.owner_id = $1
+           FROM categories c LEFT JOIN items i ON i.category = c.name AND i.owner_id = $1
            WHERE c.owner_id = $1 GROUP BY c.id
            ORDER BY CASE WHEN c.created_at::timestamp >= (NOW() - INTERVAL '12 hours') THEN 0 ELSE 1 END,
                     COUNT(i.id) DESC, MAX(i.updated_at) DESC NULLS LAST, c.created_at DESC"#,
