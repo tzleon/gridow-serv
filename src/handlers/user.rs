@@ -9,8 +9,8 @@ use serde_json::json;
 use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::models::user::{
-    UpgradeVIPRequest, UpgradeVIPResponse, User, UserInfo, UserLoginRequest,
-    UserLoginResponse, UserRegisterRequest, UserUpdateRequest,
+    ChangePasswordRequest, UpgradeVIPRequest, UpgradeVIPResponse, User, UserInfo,
+    UserLoginRequest, UserLoginResponse, UserRegisterRequest, UserUpdateRequest,
 };
 use crate::state::AppState;
 
@@ -196,6 +196,45 @@ pub async fn update_user(
         status: user.status,
         created_at: user.created_at,
     }))
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(user_public_id): Path<String>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user: User = sqlx::query_as("SELECT * FROM users WHERE public_id = $1")
+        .bind(&user_public_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(AppError::Database)?
+        .ok_or(AppError::NotFound)?;
+
+    let auth_internal_id = resolve_internal_user_id(&state, &auth.public_id).await?;
+    if user.id != auth_internal_id {
+        return Err(AppError::Forbidden);
+    }
+
+    if !verify(&req.old_password, &user.password_hash)
+        .map_err(|_| AppError::Internal("密码验证失败".to_string()))?
+    {
+        return Err(AppError::BadRequest("旧密码错误".to_string()));
+    }
+
+    let new_password_hash = hash(&req.new_password, DEFAULT_COST)
+        .map_err(|_| AppError::Internal("密码加密失败".to_string()))?;
+
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    sqlx::query("UPDATE users SET password_hash=$1, updated_at=$2 WHERE id=$3")
+        .bind(&new_password_hash)
+        .bind(&now)
+        .bind(user.id)
+        .execute(&state.db)
+        .await
+        .map_err(AppError::Database)?;
+
+    Ok(StatusCode::OK)
 }
 
 pub async fn upgrade_vip(

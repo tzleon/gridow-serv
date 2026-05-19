@@ -31,7 +31,8 @@ pub fn create_router(state: AppState) -> Router {
                 .route("/login", post(handlers::user::login_user))
                 .route("/logout", post(handlers::user::logout_user))
                 .route("/{user_id}", get(handlers::user::get_user_info).put(handlers::user::update_user))
-                .route("/{user_id}/upgrade", post(handlers::user::upgrade_vip)),
+                .route("/{user_id}/upgrade", post(handlers::user::upgrade_vip))
+                .route("/{user_id}/password", put(handlers::user::change_password)),
         )
         // ── 物品模块 ─────────────────────────────────────────
         .nest(

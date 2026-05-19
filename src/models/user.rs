@@ -60,6 +60,12 @@ pub struct UpgradeVIPRequest {
     pub plan: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct UpgradeVIPResponse {
     pub success: bool,
