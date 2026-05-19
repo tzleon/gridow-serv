@@ -169,6 +169,14 @@ pub async fn update_user(
         return Err(AppError::Forbidden);
     }
 
+    if let Some(password) = &req.password {
+        if !verify(password, &user.password_hash)
+            .map_err(|_| AppError::Internal("密码验证失败".to_string()))?
+        {
+            return Err(AppError::BadRequest("密码错误".to_string()));
+        }
+    }
+
     if let Some(username) = req.username {
         user.username = username;
     }

@@ -53,6 +53,7 @@ pub struct UserInfo {
 pub struct UserUpdateRequest {
     pub username: Option<String>,
     pub avatar: Option<String>,
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
