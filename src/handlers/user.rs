@@ -169,7 +169,11 @@ pub async fn update_user(
         return Err(AppError::Forbidden);
     }
 
-    if let Some(password) = &req.password {
+    if req.username.is_some() {
+        let password = req
+            .password
+            .as_ref()
+            .ok_or(AppError::BadRequest("修改用户名需要验证密码".to_string()))?;
         if !verify(password, &user.password_hash)
             .map_err(|_| AppError::Internal("密码验证失败".to_string()))?
         {
