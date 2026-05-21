@@ -60,20 +60,8 @@ pub async fn register_user(
     .await
     .map_err(AppError::Database)?;
 
-    let (space_id, space_public_id) = state.new_id();
-    sqlx::query(
-        r#"INSERT INTO spaces (id, public_id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
-           VALUES ($1, $2, '家', '🏠', 0, NULL, 0, 0, '', $3, $4, $5)"#,
-    )
-    .bind(space_id)
-    .bind(&space_public_id)
-    .bind(id)
-    .bind(&now)
-    .bind(&now)
-    .execute(&state.db)
-    .await
-    .map_err(AppError::Database)?;
-
+    // "家" space is no longer auto-created at registration.
+    // The guided tour will walk the user through creating it.
     Ok(AxumJson(UserInfo {
         id: public_id,
         username: req.username,
