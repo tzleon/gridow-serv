@@ -28,6 +28,7 @@ async fn resolve_space_internal(state: &AppState, public_id: &str) -> Result<i64
     Ok(id)
 }
 
+#[allow(dead_code)]
 async fn resolve_item_internal(state: &AppState, public_id: &str) -> Result<(i64, i64), AppError> {
     let row: (i64, i64) = sqlx::query_as("SELECT id, owner_id FROM items WHERE public_id = $1")
         .bind(public_id)
@@ -109,6 +110,7 @@ pub async fn create_item(
     let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
     let (id, public_id) = state.new_id();
     let now = now_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
     let tags_json = serde_json::to_string(&req.tags).unwrap_or_else(|_| "[]".to_string());
 
     let location_internal = if let Some(ref loc_pid) = req.location_id {
@@ -120,14 +122,15 @@ pub async fn create_item(
     } else { String::new() };
 
     sqlx::query(
-        r#"INSERT INTO items (id, public_id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, track_low_stock, owner_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)"#,
+        r#"INSERT INTO items (id, public_id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, track_low_stock, owner_id, created_at, updated_at, version, is_deleted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"#,
     )
     .bind(id).bind(&public_id).bind(&req.name).bind(&req.icon).bind(req.qty)
     .bind(&location).bind(location_internal).bind(&req.category).bind(&tags_json)
     .bind(&req.barcode).bind("[]").bind(&req.photo_uri).bind(&req.buy_date)
     .bind(&req.expiry).bind(&req.remark).bind(req.track_low_stock)
     .bind(user_internal).bind(&now).bind(&now)
+    .bind(version).bind(0i16)
     .execute(&state.db).await.map_err(AppError::Database)?;
 
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
@@ -198,14 +201,15 @@ pub async fn update_item(
     } else { String::new() };
 
     let now = now_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
     sqlx::query(
-        r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photo_uri=$9, buy_date=$10, expiry=$11, remark=$12, track_low_stock=$13, updated_at=$14 WHERE id=$15"#,
+        r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photo_uri=$9, buy_date=$10, expiry=$11, remark=$12, track_low_stock=$13, updated_at=$14, version=$15 WHERE id=$16"#,
     )
     .bind(&name).bind(&icon).bind(qty).bind(&location).bind(location_id)
     .bind(&category).bind(&tags).bind(&barcode).bind(&photo_uri)
     .bind(&buy_date).bind(&expiry).bind(&remark).bind(track_low_stock)
-    .bind(&now).bind(existing.id)
+    .bind(&now).bind(version).bind(existing.id)
     .execute(&state.db).await.map_err(AppError::Database)?;
 
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
@@ -231,7 +235,11 @@ pub async fn delete_item(
 
     if item.owner_id != user_internal { return Err(AppError::Forbidden); }
 
-    sqlx::query("DELETE FROM items WHERE id = $1").bind(item.id).execute(&state.db).await.map_err(AppError::Database)?;
+    let now = now_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
+
+    sqlx::query("UPDATE items SET is_deleted=1, version=$1, updated_at=$2 WHERE id=$3")
+        .bind(version).bind(&now).bind(item.id).execute(&state.db).await.map_err(AppError::Database)?;
     sqlx::query("DELETE FROM history WHERE item_id = $1").bind(item.id).execute(&state.db).await.map_err(AppError::Database)?;
     sqlx::query("DELETE FROM collaborators WHERE entity_type = 'item' AND entity_id = $1").bind(item.id).execute(&state.db).await.map_err(AppError::Database)?;
 
@@ -261,9 +269,10 @@ pub async fn outbound_item(
 
     let new_qty = existing.qty - req.qty;
     let now = now_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
-    sqlx::query("UPDATE items SET qty=$1, updated_at=$2 WHERE id=$3")
-        .bind(new_qty).bind(&now).bind(existing.id)
+    sqlx::query("UPDATE items SET qty=$1, updated_at=$2, version=$3 WHERE id=$4")
+        .bind(new_qty).bind(&now).bind(version).bind(existing.id)
         .execute(&state.db).await.map_err(AppError::Database)?;
 
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
@@ -301,9 +310,10 @@ pub async fn transfer_item(
     let old_location_id = existing.location_id;
     let to_location = get_space_path_string(&state, target_internal).await?;
     let now = now_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
-    sqlx::query("UPDATE items SET location=$1, location_id=$2, updated_at=$3 WHERE id=$4")
-        .bind(&to_location).bind(target_internal).bind(&now).bind(existing.id)
+    sqlx::query("UPDATE items SET location=$1, location_id=$2, updated_at=$3, version=$4 WHERE id=$5")
+        .bind(&to_location).bind(target_internal).bind(&now).bind(version).bind(existing.id)
         .execute(&state.db).await.map_err(AppError::Database)?;
 
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")

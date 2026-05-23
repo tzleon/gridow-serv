@@ -39,6 +39,16 @@ pub struct SyncPushResponse {
     pub success: bool,
     pub conflicts: Vec<SyncConflict>,
     pub server_time: String,
+    pub assigned_items: Vec<IdVersionMapping>,
+    pub assigned_spaces: Vec<IdVersionMapping>,
+    pub assigned_history: Vec<IdVersionMapping>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdVersionMapping {
+    pub client_id: String,
+    pub server_id: String,
+    pub version: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,4 +63,9 @@ pub struct SyncStatusResponse {
     pub last_sync_time: Option<String>,
     pub pending_changes: i32,
     pub server_time: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SyncPullParams {
+    pub local_version: Option<i64>,
 }

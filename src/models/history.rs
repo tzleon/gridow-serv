@@ -18,6 +18,9 @@ pub struct HistoryRecord {
     pub reason: Option<String>,
     pub remark: Option<String>,
     pub time: String,
+    pub version: i64,
+    #[serde(rename = "is_deleted")]
+    pub is_deleted: i16,
 }
 
 #[derive(Debug, Deserialize)]

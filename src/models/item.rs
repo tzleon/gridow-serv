@@ -25,6 +25,9 @@ pub struct Item {
     pub owner_id: i64,
     pub created_at: String,
     pub updated_at: String,
+    pub version: i64,
+    #[serde(rename = "is_deleted")]
+    pub is_deleted: i16,
 }
 
 #[derive(Debug, Deserialize)]

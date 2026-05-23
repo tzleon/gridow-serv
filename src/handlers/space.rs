@@ -40,11 +40,11 @@ pub async fn list_spaces(
     let spaces = if let Some(ref parent_pid) = params.parent_id {
         let parent_internal = resolve_space_internal(&state, parent_pid).await?;
         sqlx::query_as::<_, Space>(
-            "SELECT * FROM spaces WHERE parent_id = $1 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3)) ORDER BY sort_order, name"
+            "SELECT * FROM spaces WHERE parent_id = $1 AND is_deleted = 0 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3)) ORDER BY sort_order, name"
         ).bind(parent_internal).bind(user_internal).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?
     } else {
         sqlx::query_as::<_, Space>(
-            "SELECT * FROM spaces WHERE parent_id IS NULL AND (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) ORDER BY sort_order, name"
+            "SELECT * FROM spaces WHERE parent_id IS NULL AND is_deleted = 0 AND (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) ORDER BY sort_order, name"
         ).bind(user_internal).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?
     };
 
@@ -57,6 +57,7 @@ pub async fn create_space(
     let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
     let (id, public_id) = state.new_id();
     let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
     let (depth, parent_internal) = if let Some(ref pid) = req.parent_id {
         let pi = resolve_space_internal(&state, pid).await?;
@@ -67,12 +68,13 @@ pub async fn create_space(
     } else { (0, None) };
 
     let space = sqlx::query_as::<_, Space>(
-        r#"INSERT INTO spaces (id, public_id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, 0, $5, $6, 0, $7, $8, $9, $10) RETURNING *, (SELECT public_id FROM spaces WHERE id = $5) AS parent_public_id"#,
+        r#"INSERT INTO spaces (id, public_id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at, version, is_deleted)
+           VALUES ($1, $2, $3, $4, 0, $5, $6, 0, $7, $8, $9, $10, $11, $12) RETURNING *, (SELECT public_id FROM spaces WHERE id = $5) AS parent_public_id"#,
     )
     .bind(id).bind(&public_id).bind(&req.name).bind(&req.icon)
     .bind(parent_internal).bind(depth).bind(&req.photo_uri)
     .bind(user_internal).bind(&now).bind(&now)
+    .bind(version).bind(0i16)
     .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok((axum::http::StatusCode::CREATED, Json(space)))
@@ -124,11 +126,12 @@ pub async fn update_space(
     };
 
     let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
     let space = sqlx::query_as::<_, Space>(
-        "UPDATE spaces SET name=$1, icon=$2, photo_uri=$3, sort_order=$4, parent_id=$5, depth=$6, updated_at=$7 WHERE id=$8 RETURNING *, (SELECT public_id FROM spaces WHERE id = $5) AS parent_public_id",
+        "UPDATE spaces SET name=$1, icon=$2, photo_uri=$3, sort_order=$4, parent_id=$5, depth=$6, updated_at=$7, version=$8 WHERE id=$9 RETURNING *, (SELECT public_id FROM spaces WHERE id = $5) AS parent_public_id",
     )
-    .bind(&name).bind(&icon).bind(&photo_uri).bind(sort_order).bind(parent_internal).bind(depth).bind(&now).bind(existing.id)
+    .bind(&name).bind(&icon).bind(&photo_uri).bind(sort_order).bind(parent_internal).bind(depth).bind(&now).bind(version).bind(existing.id)
     .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(space))
@@ -144,7 +147,10 @@ pub async fn delete_space(
 
     if space.owner_id != user_internal { return Err(AppError::Forbidden); }
 
-    delete_space_recursive(&state, space.id).await?;
+    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
+
+    soft_delete_space_recursive(&state.db, space.id, &now, version).await?;
     sqlx::query("DELETE FROM collaborators WHERE entity_type = 'space' AND entity_id = $1")
         .bind(space.id).execute(&state.db).await.map_err(AppError::Database)?;
 
@@ -165,6 +171,23 @@ async fn is_descendant(db: &PgPool, ancestor: i64, target: i64) -> bool {
     }
 }
 
+async fn soft_delete_space_recursive(db: &PgPool, space_internal: i64, now: &str, version: i64) -> Result<(), AppError> {
+    let mut stack = vec![space_internal];
+    while let Some(current_id) = stack.pop() {
+        let children: Vec<Space> = sqlx::query_as("SELECT * FROM spaces WHERE parent_id = $1 AND is_deleted = 0")
+            .bind(current_id).fetch_all(db).await.map_err(AppError::Database)?;
+        for child in children { stack.push(child.id); }
+
+        sqlx::query("UPDATE items SET location_id=NULL, location='' WHERE location_id = $1")
+            .bind(current_id).execute(db).await.map_err(AppError::Database)?;
+        sqlx::query("UPDATE spaces SET is_deleted=1, version=$1, updated_at=$2 WHERE id=$3")
+            .bind(version).bind(now).bind(current_id).execute(db).await.map_err(AppError::Database)?;
+    }
+    Ok(())
+}
+
+/// 保留用于未来迁移（物理删除旧数据的兜底）
+#[allow(dead_code)]
 async fn delete_space_recursive(state: &AppState, space_internal: i64) -> Result<(), AppError> {
     let mut stack = vec![space_internal];
     while let Some(current_id) = stack.pop() {

@@ -37,6 +37,15 @@ impl AppState {
     pub fn new_public_id(&self) -> String {
         self.new_id().1
     }
+
+    /// 获取全局自增版本号（原子操作）
+    pub async fn next_version(&self) -> Result<i64, sqlx::Error> {
+        let row: (i64,) = sqlx::query_as(
+            "UPDATE global_version SET version = version + 1 WHERE id = 1 RETURNING version"
+        )
+        .fetch_one(&self.db).await?;
+        Ok(row.0)
+    }
 }
 
 pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
@@ -91,7 +100,9 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             track_low_stock BOOLEAN NOT NULL DEFAULT FALSE,
             owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL,
-            updated_at VARCHAR NOT NULL
+            updated_at VARCHAR NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0,
+            is_deleted SMALLINT NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -112,7 +123,9 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             photo_uri VARCHAR NOT NULL DEFAULT '',
             owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL,
-            updated_at VARCHAR NOT NULL
+            updated_at VARCHAR NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0,
+            is_deleted SMALLINT NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -148,7 +161,9 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             to_location VARCHAR,
             reason VARCHAR,
             remark VARCHAR,
-            time VARCHAR NOT NULL
+            time VARCHAR NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0,
+            is_deleted SMALLINT NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -180,6 +195,29 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             owner_id BIGINT NOT NULL DEFAULT 0,
             created_at VARCHAR NOT NULL
         )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    // ── 全局版本号表 ─────────────────────────────────────────
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS global_version (
+            id INT PRIMARY KEY DEFAULT 1,
+            version BIGINT NOT NULL DEFAULT 0,
+            CONSTRAINT global_version_id_check CHECK (id = 1)
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO global_version (id, version) 
+        VALUES (1, 0) 
+        ON CONFLICT (id) DO NOTHING
         "#,
     )
     .execute(&pool)
@@ -227,11 +265,15 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_public_id ON items(public_id)")
         .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_items_version ON items(version)")
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_parent_id ON spaces(parent_id)")
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_owner_id ON spaces(owner_id)")
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_public_id ON spaces(public_id)")
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_spaces_version ON spaces(version)")
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_collaborators_entity ON collaborators(entity_type, entity_id)")
         .execute(&pool).await?;
@@ -242,6 +284,8 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_type ON history(type)")
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_time ON history(time)")
+        .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_history_version ON history(version)")
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_categories_owner_id ON categories(owner_id)")
         .execute(&pool).await?;
