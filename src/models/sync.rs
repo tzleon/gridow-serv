@@ -5,24 +5,50 @@ use super::space::Space;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncPullResponse {
-    pub items: SyncEntityChange<Item>,
-    pub spaces: SyncEntityChange<Space>,
-    pub history: SyncHistoryChange,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<SyncEntityChange<Item>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spaces: Option<SyncEntityChange<Space>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history: Option<SyncHistoryChange>,
     pub server_time: String,
     pub has_more: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncEntityChange<T> {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<T>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub updated: Vec<T>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<String>,
+}
+
+impl<T> SyncEntityChange<T> {
+    pub fn is_empty(&self) -> bool {
+        self.created.is_empty() && self.updated.is_empty() && self.deleted.is_empty()
+    }
+    pub fn opt(self) -> Option<Self> {
+        if self.is_empty() { None } else { Some(self) }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncHistoryChange {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub created: Vec<HistoryRecord>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub deleted: Vec<String>,
+}
+
+impl SyncHistoryChange {
+    pub fn is_empty(&self) -> bool {
+        self.created.is_empty() && self.deleted.is_empty()
+    }
+    pub fn opt(self) -> Option<Self> {
+        if self.is_empty() { None } else { Some(self) }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,10 +63,14 @@ pub struct SyncPushRequest {
 #[derive(Debug, Serialize)]
 pub struct SyncPushResponse {
     pub success: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<SyncConflict>,
     pub server_time: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assigned_items: Vec<IdVersionMapping>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assigned_spaces: Vec<IdVersionMapping>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assigned_history: Vec<IdVersionMapping>,
 }
 

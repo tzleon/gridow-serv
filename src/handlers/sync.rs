@@ -60,9 +60,9 @@ pub async fn sync_pull(
     let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     Ok(Json(SyncPullResponse {
-        items: SyncEntityChange { created: created_items, updated: updated_items, deleted: deleted_items },
-        spaces: SyncEntityChange { created: created_spaces, updated: updated_spaces, deleted: deleted_spaces },
-        history: SyncHistoryChange { created: created_history, deleted: deleted_history },
+        items: SyncEntityChange { created: created_items, updated: updated_items, deleted: deleted_items }.opt(),
+        spaces: SyncEntityChange { created: created_spaces, updated: updated_spaces, deleted: deleted_spaces }.opt(),
+        history: SyncHistoryChange { created: created_history, deleted: deleted_history }.opt(),
         server_time, has_more: false,
     }))
 }
