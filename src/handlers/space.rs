@@ -264,6 +264,8 @@ fn build_space_tree(
                 children,
                 item_ids,
                 owner_id: public_id_map.get(&space.owner_id).cloned().unwrap_or_default(),
+                version: space.version,
+                is_deleted: space.is_deleted,
             });
         }
     }

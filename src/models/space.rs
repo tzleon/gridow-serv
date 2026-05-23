@@ -57,6 +57,9 @@ pub struct SpaceNode {
     pub children: Vec<SpaceNode>,
     pub item_ids: Vec<String>,
     pub owner_id: String,
+    pub version: i64,
+    #[serde(rename = "is_deleted")]
+    pub is_deleted: i16,
 }
 
 #[derive(Debug, Serialize)]
