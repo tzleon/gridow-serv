@@ -407,13 +407,15 @@ async fn create_history_record(
 ) -> Result<(), AppError> {
     let (id, public_id) = state.new_id();
     let time = now_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
     sqlx::query(
-        r#"INSERT INTO history (id, public_id, type, item_id, item_name, qty, from_location, to_location, reason, remark, time)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+        r#"INSERT INTO history (id, public_id, type, item_id, item_name, qty, from_location, to_location, reason, remark, time, version, is_deleted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
     )
     .bind(id).bind(&public_id).bind(history_type).bind(item_internal).bind(item_name)
     .bind(qty).bind(from_location).bind(to_location).bind(reason).bind(remark).bind(&time)
+    .bind(version).bind(0i16)
     .execute(&state.db).await.map_err(AppError::Database)?;
 
     Ok(())
