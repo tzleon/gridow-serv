@@ -123,7 +123,7 @@ pub async fn create_item(
 
     sqlx::query(
         r#"INSERT INTO items (id, public_id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, track_low_stock, owner_id, created_at, updated_at, version, is_deleted)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
     )
     .bind(id).bind(&public_id).bind(&req.name).bind(&req.icon).bind(req.qty)
     .bind(&location).bind(location_internal).bind(&req.category).bind(&tags_json)
