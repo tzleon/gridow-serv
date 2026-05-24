@@ -2,11 +2,13 @@ use axum::extract::{Query, State};
 use axum::Json;
 
 use crate::auth::AuthUser;
+use crate::models::category::{Category, SyncCategoryChange};
 use crate::models::error::AppError;
 use crate::models::history::HistoryRecord;
 use crate::models::item::Item;
 use crate::models::space::Space;
 use crate::models::sync::*;
+use crate::models::tag::{Tag, SyncTagChange};
 use crate::state::AppState;
 
 async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
@@ -57,12 +59,40 @@ pub async fn sync_pull(
     ).bind(local_version).fetch_all(&state.db).await.map_err(AppError::Database)?;
     let deleted_history: Vec<String> = deleted_history.into_iter().map(|r| r.0).collect();
 
+    let created_categories: Vec<Category> = sqlx::query_as(
+        r#"SELECT * FROM categories WHERE version > $1 AND is_deleted = 0 AND owner_id = $2"#
+    ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
+
+    let updated_categories: Vec<Category> = sqlx::query_as(
+        r#"SELECT * FROM categories WHERE version > $1 AND is_deleted = 0 AND id IN (SELECT id FROM categories WHERE version <= $1) AND owner_id = $2"#
+    ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
+
+    let deleted_categories: Vec<(String,)> = sqlx::query_as(
+        r#"SELECT public_id FROM categories WHERE version > $1 AND is_deleted = 1 AND owner_id = $2"#
+    ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
+    let deleted_categories: Vec<String> = deleted_categories.into_iter().map(|r| r.0).collect();
+
+    let created_tags: Vec<Tag> = sqlx::query_as(
+        r#"SELECT * FROM tags WHERE version > $1 AND is_deleted = 0 AND owner_id = $2"#
+    ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
+
+    let updated_tags: Vec<Tag> = sqlx::query_as(
+        r#"SELECT * FROM tags WHERE version > $1 AND is_deleted = 0 AND id IN (SELECT id FROM tags WHERE version <= $1) AND owner_id = $2"#
+    ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
+
+    let deleted_tags: Vec<(String,)> = sqlx::query_as(
+        r#"SELECT public_id FROM tags WHERE version > $1 AND is_deleted = 1 AND owner_id = $2"#
+    ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
+    let deleted_tags: Vec<String> = deleted_tags.into_iter().map(|r| r.0).collect();
+
     let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     Ok(Json(SyncPullResponse {
         items: SyncEntityChange { created: created_items, updated: updated_items, deleted: deleted_items }.opt(),
         spaces: SyncEntityChange { created: created_spaces, updated: updated_spaces, deleted: deleted_spaces }.opt(),
         history: SyncHistoryChange { created: created_history, deleted: deleted_history }.opt(),
+        categories: SyncCategoryChange { created: created_categories, updated: updated_categories, deleted: deleted_categories }.opt(),
+        tags: SyncTagChange { created: created_tags, updated: updated_tags, deleted: deleted_tags }.opt(),
         server_time, has_more: false,
     }))
 }
@@ -74,6 +104,8 @@ pub async fn sync_push(
     let mut assigned_items = Vec::new();
     let mut assigned_spaces = Vec::new();
     let mut assigned_history = Vec::new();
+    let mut assigned_categories = Vec::new();
+    let mut assigned_tags = Vec::new();
 
     if let Some(items) = req.items {
         for item in items.created {
@@ -146,6 +178,50 @@ pub async fn sync_push(
         }
     }
 
+    if let Some(categories) = req.categories {
+        for cat in categories.created {
+            let (id, public_id) = state.new_id();
+            let version = state.next_version().await.map_err(AppError::Database)?;
+
+            sqlx::query(
+                r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at, version, is_deleted)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
+            )
+            .bind(id).bind(&public_id).bind(&cat.name).bind(&cat.icon)
+            .bind(cat.sort_order).bind(cat.owner_id).bind(&cat.created_at)
+            .bind(version).bind(0i16)
+            .execute(&state.db).await.map_err(AppError::Database)?;
+
+            assigned_categories.push(IdVersionMapping {
+                client_id: cat.public_id.clone(),
+                server_id: public_id,
+                version,
+            });
+        }
+    }
+
+    if let Some(tags) = req.tags {
+        for tag in tags.created {
+            let (id, public_id) = state.new_id();
+            let version = state.next_version().await.map_err(AppError::Database)?;
+
+            sqlx::query(
+                r#"INSERT INTO tags (id, public_id, name, owner_id, created_at, version, is_deleted)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+            )
+            .bind(id).bind(&public_id).bind(&tag.name)
+            .bind(tag.owner_id).bind(&tag.created_at)
+            .bind(version).bind(0i16)
+            .execute(&state.db).await.map_err(AppError::Database)?;
+
+            assigned_tags.push(IdVersionMapping {
+                client_id: tag.public_id.clone(),
+                server_id: public_id,
+                version,
+            });
+        }
+    }
+
     let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     Ok(Json(SyncPushResponse {
@@ -155,6 +231,8 @@ pub async fn sync_push(
         assigned_items,
         assigned_spaces,
         assigned_history,
+        assigned_categories,
+        assigned_tags,
     }))
 }
 

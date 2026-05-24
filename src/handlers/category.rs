@@ -21,7 +21,7 @@ pub async fn list_categories(
     let categories = sqlx::query_as::<_, Category>(
         r#"SELECT c.*, COALESCE(COUNT(i.id), 0) AS item_count, MAX(i.updated_at) AS last_used_at
            FROM categories c LEFT JOIN items i ON i.category = c.name AND i.owner_id = $1
-           WHERE c.owner_id = $1 GROUP BY c.id
+           WHERE c.owner_id = $1 AND c.is_deleted = 0 GROUP BY c.id
            ORDER BY CASE WHEN c.created_at::timestamp >= (NOW() - INTERVAL '12 hours') THEN 0 ELSE 1 END,
                     COUNT(i.id) DESC, MAX(i.updated_at) DESC NULLS LAST, c.created_at DESC"#,
     ).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
@@ -32,10 +32,12 @@ pub async fn list_categories(
         let mut created = Vec::new();
         for (i, (name, icon)) in defaults.iter().enumerate() {
             let (id, public_id) = state.new_id();
+            let version = state.next_version().await.map_err(AppError::Database)?;
             let cat = sqlx::query_as::<_, Category>(
-                r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
+                r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at, version, is_deleted)
+                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
             ).bind(id).bind(&public_id).bind(name).bind(icon).bind(i as i32).bind(user_internal).bind(&now)
+            .bind(version).bind(0i16)
             .fetch_one(&state.db).await.map_err(AppError::Database)?;
             created.push(cat);
         }
@@ -51,15 +53,17 @@ pub async fn create_category(
     let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
     let (id, public_id) = state.new_id();
     let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
     let next_order: i32 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM categories WHERE owner_id = $1"
     ).bind(user_internal).fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     let category = sqlx::query_as::<_, Category>(
-        r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
+        r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at, version, is_deleted)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
     ).bind(id).bind(&public_id).bind(&req.name).bind(&req.icon).bind(next_order).bind(user_internal).bind(&now)
+    .bind(version).bind(0i16)
     .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok((axum::http::StatusCode::CREATED, Json(category)))
@@ -70,7 +74,7 @@ pub async fn update_category(
     Json(req): Json<CategoryUpdateRequest>,
 ) -> Result<Json<Category>, AppError> {
     let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
-    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1")
+    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1 AND is_deleted = 0")
         .bind(&cat_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
@@ -78,10 +82,11 @@ pub async fn update_category(
 
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
+    let version = state.next_version().await.map_err(AppError::Database)?;
 
     let category = sqlx::query_as::<_, Category>(
-        "UPDATE categories SET name = $1, icon = $2 WHERE id = $3 RETURNING *"
-    ).bind(&name).bind(&icon).bind(existing.id).fetch_one(&state.db).await.map_err(AppError::Database)?;
+        "UPDATE categories SET name = $1, icon = $2, version = $3 WHERE id = $4 RETURNING *"
+    ).bind(&name).bind(&icon).bind(version).bind(existing.id).fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     Ok(Json(category))
 }
@@ -90,14 +95,16 @@ pub async fn delete_category(
     State(state): State<AppState>, auth: AuthUser, Path(cat_public_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
     let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
-    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1")
+    let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1 AND is_deleted = 0")
         .bind(&cat_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
     if existing.owner_id != user_internal { return Err(AppError::Forbidden); }
 
-    sqlx::query("DELETE FROM categories WHERE id = $1")
-        .bind(existing.id).execute(&state.db).await.map_err(AppError::Database)?;
+    let version = state.next_version().await.map_err(AppError::Database)?;
+
+    sqlx::query("UPDATE categories SET is_deleted = 1, version = $1 WHERE id = $2")
+        .bind(version).bind(existing.id).execute(&state.db).await.map_err(AppError::Database)?;
 
     Ok(axum::http::StatusCode::NO_CONTENT)
 }

@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use super::category::SyncCategoryChange;
 use super::history::HistoryRecord;
 use super::item::Item;
 use super::space::Space;
+use super::tag::SyncTagChange;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SyncPullResponse {
@@ -11,6 +13,10 @@ pub struct SyncPullResponse {
     pub spaces: Option<SyncEntityChange<Space>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history: Option<SyncHistoryChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub categories: Option<SyncCategoryChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tags: Option<SyncTagChange>,
     pub server_time: String,
     pub has_more: bool,
 }
@@ -57,6 +63,8 @@ pub struct SyncPushRequest {
     pub items: Option<SyncEntityChange<Item>>,
     pub spaces: Option<SyncEntityChange<Space>>,
     pub history: Option<SyncHistoryChange>,
+    pub categories: Option<SyncCategoryChange>,
+    pub tags: Option<SyncTagChange>,
     pub client_time: Option<String>,
 }
 
@@ -72,6 +80,10 @@ pub struct SyncPushResponse {
     pub assigned_spaces: Vec<IdVersionMapping>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assigned_history: Vec<IdVersionMapping>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assigned_categories: Vec<IdVersionMapping>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assigned_tags: Vec<IdVersionMapping>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

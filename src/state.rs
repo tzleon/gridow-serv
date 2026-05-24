@@ -179,7 +179,9 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             icon VARCHAR NOT NULL DEFAULT '📦',
             sort_order INT NOT NULL DEFAULT 0,
             owner_id BIGINT NOT NULL DEFAULT 0,
-            created_at VARCHAR NOT NULL
+            created_at VARCHAR NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0,
+            is_deleted SMALLINT NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -193,7 +195,9 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
             public_id VARCHAR(32) UNIQUE NOT NULL,
             name VARCHAR NOT NULL,
             owner_id BIGINT NOT NULL DEFAULT 0,
-            created_at VARCHAR NOT NULL
+            created_at VARCHAR NOT NULL,
+            version BIGINT NOT NULL DEFAULT 0,
+            is_deleted SMALLINT NOT NULL DEFAULT 0
         )
         "#,
     )
@@ -291,10 +295,32 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_categories_public_id ON categories(public_id)")
         .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_categories_version ON categories(version)")
+        .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tags_owner_id ON tags(owner_id)")
         .execute(&pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_tags_public_id ON tags(public_id)")
         .execute(&pool).await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tags_version ON tags(version)")
+        .execute(&pool).await?;
+
+    // ── 自动迁移：给旧表加 version + is_deleted 列（幂等）──
+    sqlx::query(
+        r#"DO $$ BEGIN
+            ALTER TABLE items ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE items ADD COLUMN IF NOT EXISTS is_deleted SMALLINT NOT NULL DEFAULT 0;
+            ALTER TABLE spaces ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE spaces ADD COLUMN IF NOT EXISTS is_deleted SMALLINT NOT NULL DEFAULT 0;
+            ALTER TABLE history ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE history ADD COLUMN IF NOT EXISTS is_deleted SMALLINT NOT NULL DEFAULT 0;
+            ALTER TABLE categories ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE categories ADD COLUMN IF NOT EXISTS is_deleted SMALLINT NOT NULL DEFAULT 0;
+            ALTER TABLE tags ADD COLUMN IF NOT EXISTS version BIGINT NOT NULL DEFAULT 0;
+            ALTER TABLE tags ADD COLUMN IF NOT EXISTS is_deleted SMALLINT NOT NULL DEFAULT 0;
+        END $$"#
+    )
+    .execute(&pool)
+    .await?;
 
     Ok(pool)
 }
