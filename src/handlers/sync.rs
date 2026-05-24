@@ -98,8 +98,9 @@ pub async fn sync_pull(
 }
 
 pub async fn sync_push(
-    State(state): State<AppState>, Json(req): Json<SyncPushRequest>,
+    State(state): State<AppState>, auth: AuthUser, Json(req): Json<SyncPushRequest>,
 ) -> Result<Json<SyncPushResponse>, AppError> {
+    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
     let _conflicts: Vec<SyncConflict> = Vec::new();
     let mut assigned_items = Vec::new();
     let mut assigned_spaces = Vec::new();
@@ -188,7 +189,7 @@ pub async fn sync_push(
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
             )
             .bind(id).bind(&public_id).bind(&cat.name).bind(&cat.icon)
-            .bind(cat.sort_order).bind(cat.owner_id).bind(&cat.created_at)
+            .bind(cat.sort_order).bind(user_internal).bind(&cat.created_at)
             .bind(version).bind(0i16)
             .execute(&state.db).await.map_err(AppError::Database)?;
 
@@ -210,7 +211,7 @@ pub async fn sync_push(
                    VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
             )
             .bind(id).bind(&public_id).bind(&tag.name)
-            .bind(tag.owner_id).bind(&tag.created_at)
+            .bind(user_internal).bind(&tag.created_at)
             .bind(version).bind(0i16)
             .execute(&state.db).await.map_err(AppError::Database)?;
 
