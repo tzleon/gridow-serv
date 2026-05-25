@@ -26,24 +26,6 @@ pub async fn list_categories(
                     COUNT(i.id) DESC, MAX(i.updated_at) DESC NULLS LAST, c.created_at DESC"#,
     ).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
-    if categories.is_empty() {
-        let defaults = vec![("日用品", "🧴"), ("食品", "🍎"), ("工具", "🔧"), ("药品", "💊"), ("服装", "👕"), ("电子", "🔌")];
-        let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
-        let mut created = Vec::new();
-        for (i, (name, icon)) in defaults.iter().enumerate() {
-            let (id, public_id) = state.new_id();
-            let version = state.next_version().await.map_err(AppError::Database)?;
-            let cat = sqlx::query_as::<_, Category>(
-                r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at, version, is_deleted)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
-            ).bind(id).bind(&public_id).bind(name).bind(icon).bind(i as i32).bind(user_internal).bind(&now)
-            .bind(version).bind(0i16)
-            .fetch_one(&state.db).await.map_err(AppError::Database)?;
-            created.push(cat);
-        }
-        return Ok(Json(created));
-    }
-
     Ok(Json(categories))
 }
 

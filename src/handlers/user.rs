@@ -60,21 +60,6 @@ pub async fn register_user(
     .await
     .map_err(AppError::Database)?;
 
-    let defaults = vec![("日用品", "🧴"), ("食品", "🍎"), ("工具", "🔧"), ("药品", "💊"), ("服装", "👕"), ("电子", "🔌")];
-    let cat_now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
-    for (i, (name, icon)) in defaults.iter().enumerate() {
-        let (cat_id, cat_public_id) = state.new_id();
-        let cat_version = state.next_version().await.map_err(AppError::Database)?;
-        sqlx::query(
-            r#"INSERT INTO categories (id, public_id, name, icon, sort_order, owner_id, created_at, version, is_deleted)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#,
-        )
-        .bind(cat_id).bind(&cat_public_id).bind(name).bind(icon)
-        .bind(i as i32).bind(id).bind(&cat_now)
-        .bind(cat_version).bind(0i16)
-        .execute(&state.db).await.map_err(AppError::Database)?;
-    }
-
     Ok(AxumJson(UserInfo {
         id: public_id,
         username: req.username,
