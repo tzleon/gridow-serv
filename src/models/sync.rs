@@ -17,7 +17,6 @@ pub struct SyncPullResponse {
     pub categories: Option<SyncCategoryChange>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<SyncTagChange>,
-    pub server_time: String,
     pub has_more: bool,
 }
 
@@ -73,7 +72,6 @@ pub struct SyncPushResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<SyncConflict>,
-    pub server_time: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assigned_items: Vec<IdVersionMapping>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -104,7 +102,6 @@ pub struct SyncConflict {
 pub struct SyncStatusResponse {
     pub last_sync_time: Option<String>,
     pub pending_changes: i32,
-    pub server_time: String,
 }
 
 #[derive(Debug, Deserialize)]

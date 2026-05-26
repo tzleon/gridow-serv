@@ -85,15 +85,13 @@ pub async fn sync_pull(
     ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
     let deleted_tags: Vec<String> = deleted_tags.into_iter().map(|r| r.0).collect();
 
-    let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
     Ok(Json(SyncPullResponse {
         items: SyncEntityChange { created: created_items, updated: updated_items, deleted: deleted_items }.opt(),
         spaces: SyncEntityChange { created: created_spaces, updated: updated_spaces, deleted: deleted_spaces }.opt(),
         history: SyncHistoryChange { created: created_history, deleted: deleted_history }.opt(),
         categories: SyncCategoryChange { created: created_categories, updated: updated_categories, deleted: deleted_categories }.opt(),
         tags: SyncTagChange { created: created_tags, updated: updated_tags, deleted: deleted_tags }.opt(),
-        server_time, has_more: false,
+        has_more: false,
     }))
 }
 
@@ -223,12 +221,9 @@ pub async fn sync_push(
         }
     }
 
-    let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-
     Ok(Json(SyncPushResponse {
         success: true,
         conflicts: _conflicts,
-        server_time,
         assigned_items,
         assigned_spaces,
         assigned_history,
@@ -242,7 +237,6 @@ pub async fn sync_status(
 ) -> Result<Json<SyncStatusResponse>, AppError> {
     let row: (Option<String>, i32) = sqlx::query_as("SELECT last_sync_time, pending_changes FROM sync_status WHERE id = 1")
         .fetch_one(&state.db).await.map_err(AppError::Database)?;
-    let server_time = chrono::Utc::now().naive_utc().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    Ok(Json(SyncStatusResponse { last_sync_time: row.0, pending_changes: row.1, server_time }))
+    Ok(Json(SyncStatusResponse { last_sync_time: row.0, pending_changes: row.1 }))
 }
