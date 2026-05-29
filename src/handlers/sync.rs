@@ -18,6 +18,13 @@ async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64,
     Ok(id)
 }
 
+async fn resolve_item_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
+    let (id,): (i64,) = sqlx::query_as("SELECT id FROM items WHERE public_id = $1")
+        .bind(public_id).fetch_optional(&state.db).await
+        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
+    Ok(id)
+}
+
 pub async fn sync_pull(
     State(state): State<AppState>, auth: AuthUser, Query(params): Query<SyncPullParams>,
 ) -> Result<Json<SyncPullResponse>, AppError> {
@@ -38,11 +45,11 @@ pub async fn sync_pull(
     let deleted_items: Vec<String> = deleted_items.into_iter().map(|r| r.0).collect();
 
     let created_spaces: Vec<Space> = sqlx::query_as(
-        r#"SELECT * FROM spaces WHERE version > $1 AND is_deleted = 0 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"#
+        r#"SELECT s.*, p.public_id AS parent_public_id FROM spaces s LEFT JOIN spaces p ON s.parent_id = p.id WHERE s.version > $1 AND s.is_deleted = 0 AND (s.owner_id = $2 OR s.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"#
     ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     let updated_spaces: Vec<Space> = sqlx::query_as(
-        r#"SELECT * FROM spaces WHERE version > $1 AND is_deleted = 0 AND id IN (SELECT id FROM spaces WHERE version <= $1) AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"#
+        r#"SELECT s.*, p.public_id AS parent_public_id FROM spaces s LEFT JOIN spaces p ON s.parent_id = p.id WHERE s.version > $1 AND s.is_deleted = 0 AND s.id IN (SELECT id FROM spaces WHERE version <= $1) AND (s.owner_id = $2 OR s.id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2))"#
     ).bind(local_version).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
 
     let deleted_spaces: Vec<(String,)> = sqlx::query_as(
@@ -136,12 +143,18 @@ pub async fn sync_push(
             let (id, public_id) = state.new_id();
             let version = state.next_version().await.map_err(AppError::Database)?;
 
+            let parent_internal: Option<i64> = if let Some(ref parent_pid) = space.parent_public_id {
+                sqlx::query_as("SELECT id FROM spaces WHERE public_id = $1")
+                    .bind(parent_pid).fetch_optional(&state.db).await.map_err(AppError::Database)?
+                    .map(|(id,): (i64,)| id)
+            } else { None };
+
             sqlx::query(
                 r#"INSERT INTO spaces (id, public_id, name, icon, count, parent_id, depth, sort_order, photo_uri, owner_id, created_at, updated_at, version, is_deleted)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
             )
             .bind(id).bind(&public_id).bind(&space.name).bind(&space.icon).bind(space.count)
-            .bind(space.parent_id).bind(space.depth).bind(space.sort_order).bind(&space.photo_uri)
+            .bind(parent_internal).bind(space.depth).bind(space.sort_order).bind(&space.photo_uri)
             .bind(space.owner_id).bind(&space.created_at).bind(&space.updated_at)
             .bind(version).bind(0i16)
             .execute(&state.db).await.map_err(AppError::Database)?;
@@ -156,6 +169,25 @@ pub async fn sync_push(
 
     if let Some(history) = req.history {
         for record in history.created {
+            let item_internal = resolve_item_internal(&state, &record.item_public_id).await.ok();
+
+            if let Some(ii) = item_internal {
+                let existing: Option<(i64, String, i64)> = sqlx::query_as(
+                    r#"SELECT id, public_id, version FROM history WHERE item_id = $1 AND type = $2 AND time = $3 AND is_deleted = 0 LIMIT 1"#,
+                )
+                .bind(ii).bind(&record.r#type).bind(&record.time)
+                .fetch_optional(&state.db).await.map_err(AppError::Database)?;
+
+                if let Some((_existing_id, existing_public_id, existing_version)) = existing {
+                    assigned_history.push(IdVersionMapping {
+                        client_id: record.public_id.clone(),
+                        server_id: existing_public_id,
+                        version: existing_version,
+                    });
+                    continue;
+                }
+            }
+
             let (id, public_id) = state.new_id();
             let version = state.next_version().await.map_err(AppError::Database)?;
 
@@ -163,7 +195,7 @@ pub async fn sync_push(
                 r#"INSERT INTO history (id, public_id, type, item_id, item_name, qty, from_location, to_location, reason, remark, time, version, is_deleted)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
             )
-            .bind(id).bind(&public_id).bind(&record.r#type).bind(record.item_id)
+            .bind(id).bind(&public_id).bind(&record.r#type).bind(item_internal.unwrap_or(0))
             .bind(&record.item_name).bind(record.qty).bind(&record.from_location).bind(&record.to_location)
             .bind(&record.reason).bind(&record.remark).bind(&record.time)
             .bind(version).bind(0i16)
