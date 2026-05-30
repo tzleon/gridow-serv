@@ -324,3 +324,62 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
 
     Ok(pool)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://test:test@localhost:5432/test")
+            .expect("connect_lazy should not fail");
+        AppState::new(
+            pool,
+            "/tmp".into(),
+            "test_secret".into(),
+            "http://localhost".into(),
+            Snowflake::new(1),
+        )
+    }
+
+    #[test]
+    fn test_new_id_returns_positive_id() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = rt.block_on(async { make_test_state() });
+        let (id, public_id) = state.new_id();
+        assert!(id > 0, "snowflake ID should be positive");
+        assert!(!public_id.is_empty(), "public_id should not be empty");
+    }
+
+    #[test]
+    fn test_new_id_public_id_is_md5_hex() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = rt.block_on(async { make_test_state() });
+        let (id, public_id) = state.new_id();
+        let expected = format!("{:x}", md5::Md5::digest(id.to_string().as_bytes()));
+        assert_eq!(public_id, expected, "public_id should be MD5 hex of snowflake ID");
+        assert_eq!(public_id.len(), 32, "MD5 hex should be 32 characters");
+    }
+
+    #[test]
+    fn test_new_id_generates_unique_public_ids() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = rt.block_on(async { make_test_state() });
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let (_, public_id) = state.new_id();
+            assert!(ids.insert(public_id), "public_id should be unique");
+        }
+        assert_eq!(ids.len(), 1000);
+    }
+
+    #[test]
+    fn test_new_public_id_returns_32_char_hex() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let state = rt.block_on(async { make_test_state() });
+        let public_id = state.new_public_id();
+        assert_eq!(public_id.len(), 32, "MD5 hex should be 32 characters");
+        assert!(public_id.chars().all(|c| c.is_ascii_hexdigit()), "should be hex string");
+    }
+}
