@@ -2,7 +2,7 @@
 //!
 //! 基于 `tracing` + `tracing-subscriber` + `tracing-appender` 实现。
 //! 特性：
-//! * **双输出** — 控制台（可读格式） + 文件（JSON 格式）
+//! * **双输出** — 控制台（可读格式） + 文件（可读格式）
 //! * **按月归档** — 文件名 `gridow.2026-05.log`，月份切换时自动创建新文件
 //! * **线程安全** — `Arc<Mutex<LogFileManager>>` 保证多线程写入安全
 //!
@@ -149,12 +149,11 @@ pub fn init_logging(log_dir: &str) {
         .with_ansi(false)
         .with_writer(std::io::stdout);
 
-    // 文件输出：JSON 格式，便于日志收集工具解析
+    // 文件输出：可读格式，按月滚动
     let file_layer = fmt::layer()
         .with_target(true)
         .with_level(true)
         .with_writer(writer)
-        .json()
         .with_ansi(false);
 
     let env_filter = EnvFilter::try_from_default_env()
