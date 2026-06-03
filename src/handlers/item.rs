@@ -1,73 +1,40 @@
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
-use sqlx::PgPool;
 
 use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::models::item::*;
 use crate::state::AppState;
 
-async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
-        .bind(public_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
-async fn resolve_space_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM spaces WHERE public_id = $1")
-        .bind(public_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
-#[allow(dead_code)]
-async fn resolve_item_internal(state: &AppState, public_id: &str) -> Result<(i64, i64), AppError> {
-    let row: (i64, i64) = sqlx::query_as("SELECT id, owner_id FROM items WHERE public_id = $1")
-        .bind(public_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(AppError::Database)?
-        .ok_or(AppError::NotFound)?;
-    Ok(row)
-}
-
-async fn check_access(pool: &PgPool, user_internal: i64, entity_type: &str, entity_internal: i64, owner_internal: i64) -> Result<(), AppError> {
-    if owner_internal == user_internal { return Ok(()); }
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
-    ).bind(entity_type).bind(entity_internal).bind(user_internal)
-    .fetch_one(pool).await.map_err(AppError::Database)?;
-    if count > 0 { Ok(()) } else { Err(AppError::Forbidden) }
-}
-
 pub async fn list_items(
     State(state): State<AppState>,
     auth: AuthUser,
     Query(params): Query<ItemQueryParams>,
 ) -> Result<Json<ItemListResponse>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
 
     let sort_column = match params.sort_by.as_str() {
         "createdAt" => "created_at", "name" => "name", "qty" => "qty", "expiry" => "expiry", _ => "updated_at",
     };
-    let sort_dir = match params.sort_order.as_str() { "asc" => "ASC", _ => "DESC" };
+    let sort_dir = if params.sort_order.eq_ignore_ascii_case("asc") { "ASC" } else { "DESC" };
     let offset = (params.page - 1) * params.page_size;
 
-    let owner_condition = format!(
-        " AND (owner_id = {} OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = {}))",
-        user_internal, user_internal
+    let mut count_builder = sqlx::QueryBuilder::new(
+        "SELECT COUNT(*) FROM items WHERE is_deleted = 0 AND (owner_id = "
     );
+    count_builder.push_bind(user_internal);
+    count_builder.push(" OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = ");
+    count_builder.push_bind(user_internal);
+    count_builder.push("))");
 
-    let mut count_builder = sqlx::QueryBuilder::new(format!("SELECT COUNT(*) FROM items WHERE 1=1{}", owner_condition));
-    let mut data_builder = sqlx::QueryBuilder::new(format!("SELECT * FROM items WHERE 1=1{}", owner_condition));
+    let mut data_builder = sqlx::QueryBuilder::new(
+        "SELECT * FROM items WHERE is_deleted = 0 AND (owner_id = "
+    );
+    data_builder.push_bind(user_internal);
+    data_builder.push(" OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = ");
+    data_builder.push_bind(user_internal);
+    data_builder.push("))");
 
     if let Some(ref cat) = params.category {
         count_builder.push(" AND category = "); count_builder.push_bind(cat.clone());
@@ -86,7 +53,7 @@ pub async fn list_items(
     }
 
     if let Some(ref sid) = params.space_id {
-        let space_internal = resolve_space_internal(&state, sid).await?;
+        let space_internal = state.resolve_space_id(sid).await?;
         count_builder.push(" AND location_id = "); count_builder.push_bind(space_internal);
         data_builder.push(" AND location_id = "); data_builder.push_bind(space_internal);
     }
@@ -107,23 +74,24 @@ pub async fn create_item(
     auth: AuthUser,
     Json(req): Json<ItemCreateRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Item>), AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let (id, public_id) = state.new_id();
-    let now = now_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
     let tags_json = serde_json::to_string(&req.tags).unwrap_or_else(|_| "[]".to_string());
 
     let location_internal = if let Some(ref loc_pid) = req.location_id {
-        Some(resolve_space_internal(&state, loc_pid).await?)
+        Some(state.resolve_space_id(loc_pid).await?)
     } else { None };
 
     let location = if let Some(ref li) = location_internal {
         get_space_path_string(&state, *li).await?
     } else { String::new() };
 
-    sqlx::query(
+    let item = sqlx::query_as::<_, Item>(
         r#"INSERT INTO items (id, public_id, name, icon, qty, location, location_id, category, tags, barcode, photos, photo_uri, buy_date, expiry, remark, track_low_stock, owner_id, created_at, updated_at, version, is_deleted)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)"#,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+           RETURNING *"#,
     )
     .bind(id).bind(&public_id).bind(&req.name).bind(&req.icon).bind(req.qty)
     .bind(&location).bind(location_internal).bind(&req.category).bind(&tags_json)
@@ -131,10 +99,7 @@ pub async fn create_item(
     .bind(&req.expiry).bind(&req.remark).bind(req.track_low_stock)
     .bind(user_internal).bind(&now).bind(&now)
     .bind(version).bind(0i16)
-    .execute(&state.db).await.map_err(AppError::Database)?;
-
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
-        .bind(id).fetch_one(&state.db).await.map_err(AppError::Database)?;
+    .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     if let Some(li) = location_internal {
         update_space_count(&state, li).await?;
@@ -150,12 +115,12 @@ pub async fn get_item(
     auth: AuthUser,
     Path(item_public_id): Path<String>,
 ) -> Result<Json<Item>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE public_id = $1")
         .bind(&item_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "item", item.id, item.owner_id).await?;
+    state.check_access(user_internal, "item", item.id, item.owner_id).await?;
     Ok(Json(item))
 }
 
@@ -165,12 +130,12 @@ pub async fn update_item(
     Path(item_public_id): Path<String>,
     Json(req): Json<ItemUpdateRequest>,
 ) -> Result<Json<Item>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE public_id = $1")
         .bind(&item_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "item", existing.id, existing.owner_id).await?;
+    state.check_access(user_internal, "item", existing.id, existing.owner_id).await?;
 
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
@@ -190,7 +155,7 @@ pub async fn update_item(
     let old_location_id = existing.location_id;
     let location_id = match req.location_id {
         Some(lid) => match lid {
-            Some(ref pid) => Some(resolve_space_internal(&state, pid).await?),
+            Some(ref pid) => Some(state.resolve_space_id(pid).await?),
             None => None,
         },
         None => existing.location_id,
@@ -200,20 +165,17 @@ pub async fn update_item(
         get_space_path_string(&state, *loc_id).await?
     } else { String::new() };
 
-    let now = now_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
-    sqlx::query(
-        r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photo_uri=$9, buy_date=$10, expiry=$11, remark=$12, track_low_stock=$13, updated_at=$14, version=$15 WHERE id=$16"#,
+    let item = sqlx::query_as::<_, Item>(
+        r#"UPDATE items SET name=$1, icon=$2, qty=$3, location=$4, location_id=$5, category=$6, tags=$7, barcode=$8, photo_uri=$9, buy_date=$10, expiry=$11, remark=$12, track_low_stock=$13, updated_at=$14, version=$15 WHERE id=$16 RETURNING *"#,
     )
     .bind(&name).bind(&icon).bind(qty).bind(&location).bind(location_id)
     .bind(&category).bind(&tags).bind(&barcode).bind(&photo_uri)
     .bind(&buy_date).bind(&expiry).bind(&remark).bind(track_low_stock)
     .bind(&now).bind(version).bind(existing.id)
-    .execute(&state.db).await.map_err(AppError::Database)?;
-
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
-        .bind(existing.id).fetch_one(&state.db).await.map_err(AppError::Database)?;
+    .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     if old_location_id != location_id {
         if let Some(old_loc) = old_location_id { update_space_count(&state, old_loc).await?; }
@@ -228,14 +190,14 @@ pub async fn delete_item(
     auth: AuthUser,
     Path(item_public_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE public_id = $1")
         .bind(&item_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
     if item.owner_id != user_internal { return Err(AppError::Forbidden); }
 
-    let now = now_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
     sqlx::query("UPDATE items SET is_deleted=1, version=$1, updated_at=$2 WHERE id=$3")
@@ -256,27 +218,24 @@ pub async fn outbound_item(
 ) -> Result<Json<Item>, AppError> {
     if req.qty < 1 { return Err(AppError::BadRequest("出库数量必须大于0".to_string())); }
 
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE public_id = $1")
         .bind(&item_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "item", existing.id, existing.owner_id).await?;
+    state.check_access(user_internal, "item", existing.id, existing.owner_id).await?;
 
     if existing.qty < req.qty {
         return Err(AppError::BadRequest(format!("库存不足，当前库存: {}", existing.qty)));
     }
 
     let new_qty = existing.qty - req.qty;
-    let now = now_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
-    sqlx::query("UPDATE items SET qty=$1, updated_at=$2, version=$3 WHERE id=$4")
+    let item = sqlx::query_as::<_, Item>("UPDATE items SET qty=$1, updated_at=$2, version=$3 WHERE id=$4 RETURNING *")
         .bind(new_qty).bind(&now).bind(version).bind(existing.id)
-        .execute(&state.db).await.map_err(AppError::Database)?;
-
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
-        .bind(existing.id).fetch_one(&state.db).await.map_err(AppError::Database)?;
+        .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     create_history_record(&state, "out", existing.id, &existing.name, req.qty, Some(&existing.location), None, Some(&req.reason), None).await?;
 
@@ -293,14 +252,14 @@ pub async fn transfer_item(
 ) -> Result<Json<Item>, AppError> {
     if req.qty < 1 { return Err(AppError::BadRequest("转移数量必须大于0".to_string())); }
 
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let existing = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE public_id = $1")
         .bind(&item_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "item", existing.id, existing.owner_id).await?;
+    state.check_access(user_internal, "item", existing.id, existing.owner_id).await?;
 
-    let target_internal = resolve_space_internal(&state, &req.target_space_id).await?;
+    let target_internal = state.resolve_space_id(&req.target_space_id).await?;
 
     let _target = sqlx::query_as::<_, crate::models::space::Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(target_internal).fetch_optional(&state.db).await
@@ -309,15 +268,12 @@ pub async fn transfer_item(
     let from_location = existing.location.clone();
     let old_location_id = existing.location_id;
     let to_location = get_space_path_string(&state, target_internal).await?;
-    let now = now_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
-    sqlx::query("UPDATE items SET location=$1, location_id=$2, updated_at=$3, version=$4 WHERE id=$5")
+    let item = sqlx::query_as::<_, Item>("UPDATE items SET location=$1, location_id=$2, updated_at=$3, version=$4 WHERE id=$5 RETURNING *")
         .bind(&to_location).bind(target_internal).bind(&now).bind(version).bind(existing.id)
-        .execute(&state.db).await.map_err(AppError::Database)?;
-
-    let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE id = $1")
-        .bind(existing.id).fetch_one(&state.db).await.map_err(AppError::Database)?;
+        .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
     create_history_record(&state, "move", existing.id, &existing.name, req.qty, Some(&from_location), Some(&to_location), None, None).await?;
 
@@ -332,12 +288,12 @@ pub async fn get_item_by_barcode(
     auth: AuthUser,
     Path(barcode): Path<String>,
 ) -> Result<Json<Item>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let item = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE barcode = $1")
         .bind(&barcode).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "item", item.id, item.owner_id).await?;
+    state.check_access(user_internal, "item", item.id, item.owner_id).await?;
     Ok(Json(item))
 }
 
@@ -346,7 +302,7 @@ pub async fn get_expiring_items(
     auth: AuthUser,
     Query(params): Query<ExpiringQueryParams>,
 ) -> Result<Json<Vec<Item>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let days = params.days.unwrap_or(30);
     let target_date = chrono::Local::now()
         .checked_add_signed(chrono::Duration::days(days as i64))
@@ -367,7 +323,7 @@ pub async fn get_low_stock_items(
     auth: AuthUser,
     Query(params): Query<LowStockQueryParams>,
 ) -> Result<Json<Vec<Item>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let threshold = params.threshold.unwrap_or(1);
 
     let items = sqlx::query_as::<_, Item>(
@@ -406,7 +362,7 @@ async fn create_history_record(
     reason: Option<&str>, remark: Option<&str>,
 ) -> Result<(), AppError> {
     let (id, public_id) = state.new_id();
-    let time = now_string();
+    let time = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
     sqlx::query(

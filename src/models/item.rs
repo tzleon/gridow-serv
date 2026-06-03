@@ -119,7 +119,8 @@ fn default_sort_by() -> String { "updatedAt".to_string() }
 fn default_sort_order() -> String { "desc".to_string() }
 fn default_one() -> i32 { 1 }
 
-pub fn now_string() -> String {
+#[cfg(test)]
+pub(crate) fn now_string() -> String {
     chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string()
 }
 

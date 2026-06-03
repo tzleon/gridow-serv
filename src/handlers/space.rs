@@ -9,36 +9,13 @@ use crate::models::item::Item;
 use crate::models::space::*;
 use crate::state::AppState;
 
-async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
-        .bind(public_id).fetch_optional(&state.db).await
-        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
-async fn resolve_space_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM spaces WHERE public_id = $1")
-        .bind(public_id).fetch_optional(&state.db).await
-        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
-async fn check_access(pool: &PgPool, user_internal: i64, entity_type: &str, entity_internal: i64, owner_internal: i64) -> Result<(), AppError> {
-    if owner_internal == user_internal { return Ok(()); }
-    let (count,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
-    ).bind(entity_type).bind(entity_internal).bind(user_internal)
-    .fetch_one(pool).await.map_err(AppError::Database)?;
-    if count > 0 { Ok(()) } else { Err(AppError::Forbidden) }
-}
-
 pub async fn list_spaces(
     State(state): State<AppState>, auth: AuthUser, Query(params): Query<SpaceListParams>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
 
     let spaces = if let Some(ref parent_pid) = params.parent_id {
-        let parent_internal = resolve_space_internal(&state, parent_pid).await?;
+        let parent_internal = state.resolve_space_id(parent_pid).await?;
         sqlx::query_as::<_, Space>(
             "SELECT * FROM spaces WHERE parent_id = $1 AND is_deleted = 0 AND (owner_id = $2 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $3)) ORDER BY sort_order, name"
         ).bind(parent_internal).bind(user_internal).bind(user_internal).fetch_all(&state.db).await.map_err(AppError::Database)?
@@ -54,13 +31,13 @@ pub async fn list_spaces(
 pub async fn create_space(
     State(state): State<AppState>, auth: AuthUser, Json(req): Json<SpaceCreateRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Space>), AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let (id, public_id) = state.new_id();
-    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
     let (depth, parent_internal) = if let Some(ref pid) = req.parent_id {
-        let pi = resolve_space_internal(&state, pid).await?;
+        let pi = state.resolve_space_id(pid).await?;
         let parent: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
             .bind(pi).fetch_optional(&state.db).await
             .map_err(AppError::Database)?.ok_or(AppError::BadRequest("父空间不存在".to_string()))?;
@@ -83,12 +60,12 @@ pub async fn create_space(
 pub async fn get_space(
     State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<Space>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE public_id = $1")
         .bind(&space_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "space", space.id, space.owner_id).await?;
+    state.check_access(user_internal, "space", space.id, space.owner_id).await?;
     Ok(Json(space))
 }
 
@@ -96,12 +73,12 @@ pub async fn update_space(
     State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
     Json(req): Json<SpaceUpdateRequest>,
 ) -> Result<Json<Space>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let existing = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE public_id = $1")
         .bind(&space_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "space", existing.id, existing.owner_id).await?;
+    state.check_access(user_internal, "space", existing.id, existing.owner_id).await?;
 
     let name = req.name.unwrap_or(existing.name);
     let icon = req.icon.unwrap_or(existing.icon);
@@ -112,20 +89,20 @@ pub async fn update_space(
         if parent_pid == &space_public_id {
             return Err(AppError::BadRequest("不能将自己设为上级空间".to_string()));
         }
-        let pi = resolve_space_internal(&state, parent_pid).await?;
+        let pi = state.resolve_space_id(parent_pid).await?;
         if is_descendant(&state.db, existing.id, pi).await {
             return Err(AppError::BadRequest("不能将子空间设为上级空间".to_string()));
         }
         let parent: Space = sqlx::query_as("SELECT * FROM spaces WHERE id = $1")
             .bind(pi).fetch_optional(&state.db).await
             .map_err(AppError::Database)?.ok_or(AppError::BadRequest("上级空间不存在".to_string()))?;
-        check_access(&state.db, user_internal, "space", parent.id, parent.owner_id).await?;
+        state.check_access(user_internal, "space", parent.id, parent.owner_id).await?;
         (Some(pi), parent.depth + 1)
     } else {
         (None, 0)
     };
 
-    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
     let space = sqlx::query_as::<_, Space>(
@@ -140,14 +117,14 @@ pub async fn update_space(
 pub async fn delete_space(
     State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE public_id = $1")
         .bind(&space_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
     if space.owner_id != user_internal { return Err(AppError::Forbidden); }
 
-    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
     soft_delete_space_recursive(&state.db, space.id, &now, version).await?;
@@ -186,27 +163,10 @@ async fn soft_delete_space_recursive(db: &PgPool, space_internal: i64, now: &str
     Ok(())
 }
 
-/// 保留用于未来迁移（物理删除旧数据的兜底）
-#[allow(dead_code)]
-async fn delete_space_recursive(state: &AppState, space_internal: i64) -> Result<(), AppError> {
-    let mut stack = vec![space_internal];
-    while let Some(current_id) = stack.pop() {
-        let children: Vec<Space> = sqlx::query_as("SELECT * FROM spaces WHERE parent_id = $1")
-            .bind(current_id).fetch_all(&state.db).await.map_err(AppError::Database)?;
-        for child in children { stack.push(child.id); }
-
-        sqlx::query("UPDATE items SET location_id=NULL, location='' WHERE location_id = $1")
-            .bind(current_id).execute(&state.db).await.map_err(AppError::Database)?;
-        sqlx::query("DELETE FROM spaces WHERE id = $1")
-            .bind(current_id).execute(&state.db).await.map_err(AppError::Database)?;
-    }
-    Ok(())
-}
-
 pub async fn get_space_tree(
     State(state): State<AppState>, auth: AuthUser,
 ) -> Result<Json<Vec<SpaceNode>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
 
     let all_spaces: Vec<Space> = sqlx::query_as::<_, Space>(
         "SELECT * FROM spaces WHERE (owner_id = $1 OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'space' AND user_id = $2)) ORDER BY sort_order, name"
@@ -222,8 +182,16 @@ pub async fn get_space_tree(
     };
 
     let public_id_map: std::collections::HashMap<i64, String> = all_spaces.iter().map(|s| (s.id, s.public_id.clone())).collect();
-    let item_public_map: std::collections::HashMap<i64, String> = {
-        let items: Vec<(i64, String)> = sqlx::query_as("SELECT id, public_id FROM items").fetch_all(&state.db).await.unwrap_or_default();
+    let item_public_map: std::collections::HashMap<i64, String> = if space_internals.is_empty() { std::collections::HashMap::new() } else {
+        let mut qb = sqlx::QueryBuilder::new("SELECT id, public_id FROM items WHERE location_id IN (");
+        let mut sep = qb.separated(", ");
+        for sid in &space_internals { sep.push_bind(sid); }
+        sep.push_unseparated(") AND is_deleted = 0 AND (owner_id = ");
+        qb.push_bind(user_internal);
+        qb.push(" OR id IN (SELECT entity_id FROM collaborators WHERE entity_type = 'item' AND user_id = ");
+        qb.push_bind(user_internal);
+        qb.push("))");
+        let items: Vec<(i64, String)> = qb.build_query_as().fetch_all(&state.db).await.map_err(AppError::Database)?;
         items.into_iter().collect()
     };
 
@@ -275,13 +243,13 @@ fn build_space_tree(
 pub async fn get_space_children(
     State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<Vec<Space>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
-    let space_internal = resolve_space_internal(&state, &space_public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
+    let space_internal = state.resolve_space_id(&space_public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(space_internal).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "space", space_internal, space.owner_id).await?;
+    state.check_access(user_internal, "space", space_internal, space.owner_id).await?;
 
     let children = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE parent_id = $1 ORDER BY sort_order, name")
         .bind(space_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
@@ -292,13 +260,13 @@ pub async fn get_space_children(
 pub async fn get_space_items(
     State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<Vec<Item>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
-    let space_internal = resolve_space_internal(&state, &space_public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
+    let space_internal = state.resolve_space_id(&space_public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(space_internal).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "space", space_internal, space.owner_id).await?;
+    state.check_access(user_internal, "space", space_internal, space.owner_id).await?;
 
     let items = sqlx::query_as::<_, Item>("SELECT * FROM items WHERE location_id = $1")
         .bind(space_internal).fetch_all(&state.db).await.map_err(AppError::Database)?;
@@ -309,13 +277,13 @@ pub async fn get_space_items(
 pub async fn get_space_path(
     State(state): State<AppState>, auth: AuthUser, Path(space_public_id): Path<String>,
 ) -> Result<Json<SpacePathResponse>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
-    let space_internal = resolve_space_internal(&state, &space_public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
+    let space_internal = state.resolve_space_id(&space_public_id).await?;
     let space = sqlx::query_as::<_, Space>("SELECT * FROM spaces WHERE id = $1")
         .bind(space_internal).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
 
-    check_access(&state.db, user_internal, "space", space_internal, space.owner_id).await?;
+    state.check_access(user_internal, "space", space_internal, space.owner_id).await?;
 
     let segments = get_space_path_segments(&state.db, space_internal).await?;
     let path = segments.iter().map(|s| format!("{} {}", s.icon, s.name)).collect::<Vec<_>>().join(" > ");

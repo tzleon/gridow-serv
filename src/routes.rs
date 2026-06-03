@@ -5,7 +5,7 @@
 //!
 //! # 路由结构
 //! ```text
-//! /v1/users/*     — 用户注册/登录/信息/升级
+//! /v1/users/*     — 用户注册/登录/信息/升级/忘记密码
 //! /v1/items/*     — 物品 CRUD / 出库 / 转移 / 协管
 //! /v1/spaces/*    — 空间 CRUD / 树 / 子节点 / 路径 / 协管
 //! /v1/history/*   — 操作历史查询
@@ -32,7 +32,10 @@ pub fn create_router(state: AppState) -> Router {
                 .route("/logout", post(handlers::user::logout_user))
                 .route("/{user_id}", get(handlers::user::get_user_info).put(handlers::user::update_user))
                 .route("/{user_id}/upgrade", post(handlers::user::upgrade_vip))
-                .route("/{user_id}/password", put(handlers::user::change_password)),
+                .route("/{user_id}/password", put(handlers::user::change_password))
+                .route("/forgot-password", post(handlers::user::send_reset_code))
+                .route("/verify-code", post(handlers::user::verify_reset_code))
+                .route("/reset-password", post(handlers::user::reset_password)),
         )
         // ── 物品模块 ─────────────────────────────────────────
         .nest(

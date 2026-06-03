@@ -6,17 +6,10 @@ use crate::models::category::*;
 use crate::models::error::AppError;
 use crate::state::AppState;
 
-async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
-        .bind(public_id).fetch_optional(&state.db).await
-        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
 pub async fn list_categories(
     State(state): State<AppState>, auth: AuthUser,
 ) -> Result<Json<Vec<Category>>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
 
     let categories = sqlx::query_as::<_, Category>(
         r#"SELECT c.*, COALESCE(COUNT(i.id), 0) AS item_count, MAX(i.updated_at) AS last_used_at
@@ -32,9 +25,9 @@ pub async fn list_categories(
 pub async fn create_category(
     State(state): State<AppState>, auth: AuthUser, Json(req): Json<CategoryCreateRequest>,
 ) -> Result<(axum::http::StatusCode, Json<Category>), AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let (id, public_id) = state.new_id();
-    let now = chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = AppState::now_string();
     let version = state.next_version().await.map_err(AppError::Database)?;
 
     let next_order: i32 = sqlx::query_scalar(
@@ -55,7 +48,7 @@ pub async fn update_category(
     State(state): State<AppState>, auth: AuthUser, Path(cat_public_id): Path<String>,
     Json(req): Json<CategoryUpdateRequest>,
 ) -> Result<Json<Category>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1 AND is_deleted = 0")
         .bind(&cat_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
@@ -76,7 +69,7 @@ pub async fn update_category(
 pub async fn delete_category(
     State(state): State<AppState>, auth: AuthUser, Path(cat_public_id): Path<String>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let existing = sqlx::query_as::<_, Category>("SELECT * FROM categories WHERE public_id = $1 AND is_deleted = 0")
         .bind(&cat_public_id).fetch_optional(&state.db).await
         .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;

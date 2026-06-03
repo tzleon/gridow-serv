@@ -1,14 +1,3 @@
-//! 图片管理处理器
-//!
-//! 提供图片上传和访问功能：
-//! * 上传支持 JPG / PNG / WEBP 格式，限制 10MB
-//! * 自动检查图片大小，超过阈值自动缩放至缩略图（最大 800x800 像素）
-//! * 文件名使用雪花 ID 生成，避免冲突
-//! * 通过 Content-Type 头正确返回 MIME 类型
-//!
-//! # 安全说明
-//! 当前为公开接口（无需认证），适用于物品图片等非敏感资源。
-
 use axum::extract::{Multipart, Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -17,15 +6,20 @@ use image::ImageFormat;
 use std::io::Cursor;
 use tokio::io::AsyncWriteExt;
 
+use crate::auth::AuthUser;
 use crate::models::error::AppError;
 use crate::state::AppState;
 
 const MAX_THUMBNAIL_SIZE: u32 = 800;
+const MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 
 pub async fn upload_image(
     State(state): State<AppState>,
+    auth: AuthUser,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    let _user_internal = state.resolve_user_id(&auth.public_id).await?;
+
     let mut image_id = String::new();
     let mut image_url = String::new();
 
@@ -53,7 +47,7 @@ pub async fn upload_image(
                 .await
                 .map_err(|e| AppError::BadRequest(format!("读取文件失败: {}", e)))?;
 
-            if data.len() > 10 * 1024 * 1024 {
+            if data.len() > MAX_FILE_SIZE {
                 return Err(AppError::PayloadTooLarge);
             }
 
@@ -128,6 +122,10 @@ pub async fn get_image(
     State(state): State<AppState>,
     Path(filename): Path<String>,
 ) -> Result<Response, AppError> {
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err(AppError::BadRequest("非法文件名".to_string()));
+    }
+
     let filepath = std::path::Path::new(&state.upload_dir).join(&filename);
 
     if !filepath.exists() {

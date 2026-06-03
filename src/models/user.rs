@@ -74,6 +74,36 @@ pub struct UpgradeVIPResponse {
     pub new_role: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyCodeRequest {
+    pub email: String,
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResetPasswordRequest {
+    pub email: String,
+    pub code: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SendCodeResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct VerifyCodeResponse {
+    pub success: bool,
+    pub message: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +314,110 @@ mod tests {
         assert_eq!(restored.username, original.username);
         assert_eq!(restored.email, original.email);
         assert_eq!(restored.role, original.role);
+    }
+
+    #[test]
+    fn test_forgot_password_request() {
+        let json = r#"{"email": "user@example.com"}"#;
+        let req: ForgotPasswordRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+    }
+
+    #[test]
+    fn test_forgot_password_request_missing_email() {
+        let json = r#"{}"#;
+        let result = serde_json::from_str::<ForgotPasswordRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_code_request() {
+        let json = r#"{"email": "user@example.com", "code": "ABC123"}"#;
+        let req: VerifyCodeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+        assert_eq!(req.code, "ABC123");
+    }
+
+    #[test]
+    fn test_verify_code_request_missing_code() {
+        let json = r#"{"email": "user@example.com"}"#;
+        let result = serde_json::from_str::<VerifyCodeRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verify_code_request_missing_email() {
+        let json = r#"{"code": "ABC123"}"#;
+        let result = serde_json::from_str::<VerifyCodeRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reset_password_request() {
+        let json = r#"{"email": "user@example.com", "code": "ABC123", "new_password": "newpass123"}"#;
+        let req: ResetPasswordRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.email, "user@example.com");
+        assert_eq!(req.code, "ABC123");
+        assert_eq!(req.new_password, "newpass123");
+    }
+
+    #[test]
+    fn test_reset_password_request_missing_new_password() {
+        let json = r#"{"email": "user@example.com", "code": "ABC123"}"#;
+        let result = serde_json::from_str::<ResetPasswordRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reset_password_request_missing_code() {
+        let json = r#"{"email": "user@example.com", "new_password": "newpass123"}"#;
+        let result = serde_json::from_str::<ResetPasswordRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reset_password_request_missing_email() {
+        let json = r#"{"code": "ABC123", "new_password": "newpass123"}"#;
+        let result = serde_json::from_str::<ResetPasswordRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reset_password_request_invalid_json() {
+        let json = r#"not valid json"#;
+        let result = serde_json::from_str::<ResetPasswordRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_send_code_response_serialization() {
+        let resp = SendCodeResponse {
+            success: true,
+            message: "验证码已发送，请查收邮箱".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("验证码已发送"));
+    }
+
+    #[test]
+    fn test_verify_code_response_serialization() {
+        let resp = VerifyCodeResponse {
+            success: true,
+            message: "验证码验证成功".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"success\":true"));
+        assert!(json.contains("验证码验证成功"));
+    }
+
+    #[test]
+    fn test_verify_code_response_failure() {
+        let resp = VerifyCodeResponse {
+            success: false,
+            message: "验证码无效或已过期".into(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"success\":false"));
     }
 }

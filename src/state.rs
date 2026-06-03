@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use md5::Digest;
+use crate::models::error::AppError;
 use crate::snowflake::Snowflake;
 
 /// 应用全局共享状态
@@ -45,6 +46,52 @@ impl AppState {
         )
         .fetch_one(&self.db).await?;
         Ok(row.0)
+    }
+
+    pub async fn resolve_user_id(&self, public_id: &str) -> Result<i64, AppError> {
+        let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
+            .bind(public_id)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(AppError::Database)?
+            .ok_or(AppError::NotFound)?;
+        Ok(id)
+    }
+
+    pub async fn resolve_space_id(&self, public_id: &str) -> Result<i64, AppError> {
+        let (id,): (i64,) = sqlx::query_as("SELECT id FROM spaces WHERE public_id = $1")
+            .bind(public_id)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(AppError::Database)?
+            .ok_or(AppError::NotFound)?;
+        Ok(id)
+    }
+
+    pub async fn resolve_item_id(&self, public_id: &str) -> Result<i64, AppError> {
+        let (id,): (i64,) = sqlx::query_as("SELECT id FROM items WHERE public_id = $1")
+            .bind(public_id)
+            .fetch_optional(&self.db)
+            .await
+            .map_err(AppError::Database)?
+            .ok_or(AppError::NotFound)?;
+        Ok(id)
+    }
+
+    pub async fn check_access(&self, user_internal: i64, entity_type: &str, entity_internal: i64, owner_internal: i64) -> Result<(), AppError> {
+        if owner_internal == user_internal {
+            return Ok(());
+        }
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM collaborators WHERE entity_type = $1 AND entity_id = $2 AND user_id = $3"
+        )
+        .bind(entity_type).bind(entity_internal).bind(user_internal)
+        .fetch_one(&self.db).await.map_err(AppError::Database)?;
+        if count > 0 { Ok(()) } else { Err(AppError::Forbidden) }
+    }
+
+    pub fn now_string() -> String {
+        chrono::Utc::now().naive_utc().format("%Y-%m-%d %H:%M:%S").to_string()
     }
 }
 
@@ -204,6 +251,23 @@ pub async fn init_database(database_url: &str) -> Result<PgPool, sqlx::Error> {
     .execute(&pool)
     .await?;
 
+    // ── 密码重置验证码表 ─────────────────────────────────────
+    // 用 user_id 做 UNIQUE 关联，不直接耦合 email 或手机号。
+    // 无论用户用哪种方式登录（邮箱/手机号），最终都对应同一个 user_id。
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS password_reset_codes (
+            id BIGINT PRIMARY KEY,
+            user_id BIGINT UNIQUE NOT NULL REFERENCES users(id),
+            code VARCHAR(10) NOT NULL,
+            expires_at BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await?;
+
     // ── 全局版本号表 ─────────────────────────────────────────
     sqlx::query(
         r#"
@@ -343,43 +407,53 @@ mod tests {
         )
     }
 
+    fn with_runtime<F, T>(f: F) -> T
+    where
+        F: FnOnce(AppState) -> T,
+    {
+        let rt = tokio::runtime::Runtime::new().expect("create tokio runtime");
+        let _guard = rt.enter();
+        let state = make_test_state();
+        f(state)
+    }
+
     #[test]
     fn test_new_id_returns_positive_id() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let state = rt.block_on(async { make_test_state() });
-        let (id, public_id) = state.new_id();
-        assert!(id > 0, "snowflake ID should be positive");
-        assert!(!public_id.is_empty(), "public_id should not be empty");
+        with_runtime(|state| {
+            let (id, public_id) = state.new_id();
+            assert!(id > 0, "snowflake ID should be positive");
+            assert!(!public_id.is_empty(), "public_id should not be empty");
+        });
     }
 
     #[test]
     fn test_new_id_public_id_is_md5_hex() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let state = rt.block_on(async { make_test_state() });
-        let (id, public_id) = state.new_id();
-        let expected = format!("{:x}", md5::Md5::digest(id.to_string().as_bytes()));
-        assert_eq!(public_id, expected, "public_id should be MD5 hex of snowflake ID");
-        assert_eq!(public_id.len(), 32, "MD5 hex should be 32 characters");
+        with_runtime(|state| {
+            let (id, public_id) = state.new_id();
+            let expected = format!("{:x}", md5::Md5::digest(id.to_string().as_bytes()));
+            assert_eq!(public_id, expected, "public_id should be MD5 hex of snowflake ID");
+            assert_eq!(public_id.len(), 32, "MD5 hex should be 32 characters");
+        });
     }
 
     #[test]
     fn test_new_id_generates_unique_public_ids() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let state = rt.block_on(async { make_test_state() });
-        let mut ids = std::collections::HashSet::new();
-        for _ in 0..1000 {
-            let (_, public_id) = state.new_id();
-            assert!(ids.insert(public_id), "public_id should be unique");
-        }
-        assert_eq!(ids.len(), 1000);
+        with_runtime(|state| {
+            let mut ids = std::collections::HashSet::new();
+            for _ in 0..1000 {
+                let (_, public_id) = state.new_id();
+                assert!(ids.insert(public_id), "public_id should be unique");
+            }
+            assert_eq!(ids.len(), 1000);
+        });
     }
 
     #[test]
     fn test_new_public_id_returns_32_char_hex() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let state = rt.block_on(async { make_test_state() });
-        let public_id = state.new_public_id();
-        assert_eq!(public_id.len(), 32, "MD5 hex should be 32 characters");
-        assert!(public_id.chars().all(|c| c.is_ascii_hexdigit()), "should be hex string");
+        with_runtime(|state| {
+            let public_id = state.new_public_id();
+            assert_eq!(public_id.len(), 32, "MD5 hex should be 32 characters");
+            assert!(public_id.chars().all(|c| c.is_ascii_hexdigit()), "should be hex string");
+        });
     }
 }

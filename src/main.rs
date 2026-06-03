@@ -16,11 +16,13 @@
 //! * `LOG_DIR`              - 日志文件目录（默认 ./logs）
 //! * `JWT_SECRET`           - JWT 签名密钥
 //! * `SNOWFLAKE_WORKER_ID`  - 雪花算法 Worker ID（0~1023，默认 0）
+//! * `CORS_ALLOWED_ORIGINS` - CORS 允许的来源（逗号分隔，默认空）
 
 use std::path::PathBuf;
 
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use axum::http::HeaderValue;
 
 use gridow_web::{logging, routes, snowflake::Snowflake, state};
 
@@ -62,8 +64,25 @@ async fn main() {
         .unwrap_or_else(|_| "https://gridow.richking.top".to_string());
     let app_state = state::AppState::new(pool, upload_dir, jwt_secret, base_url, snowflake);
 
+    // 配置 CORS
+    let cors_layer = if let Ok(origins) = std::env::var("CORS_ALLOWED_ORIGINS") {
+        let origins_list: Vec<&str> = origins.split(',').collect();
+        let mut cors = CorsLayer::new()
+            .allow_methods(Any)
+            .allow_headers(Any);
+        for origin in origins_list {
+            if let Ok(value) = origin.trim().parse::<HeaderValue>() {
+                cors = cors.allow_origin([value].into_iter().collect::<Vec<_>>());
+            }
+        }
+        cors
+    } else {
+        tracing::warn!("未设置 CORS_ALLOWED_ORIGINS，生产环境请配置！");
+        CorsLayer::permissive()
+    };
+
     let app = routes::create_router(app_state)
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer)
         .layer(TraceLayer::new_for_http());
 
     let addr = std::env::var("LISTEN_ADDR")

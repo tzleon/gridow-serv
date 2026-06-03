@@ -11,24 +11,10 @@ use crate::models::sync::*;
 use crate::models::tag::{Tag, SyncTagChange};
 use crate::state::AppState;
 
-async fn resolve_user_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM users WHERE public_id = $1")
-        .bind(public_id).fetch_optional(&state.db).await
-        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
-async fn resolve_item_internal(state: &AppState, public_id: &str) -> Result<i64, AppError> {
-    let (id,): (i64,) = sqlx::query_as("SELECT id FROM items WHERE public_id = $1")
-        .bind(public_id).fetch_optional(&state.db).await
-        .map_err(AppError::Database)?.ok_or(AppError::NotFound)?;
-    Ok(id)
-}
-
 pub async fn sync_pull(
     State(state): State<AppState>, auth: AuthUser, Query(params): Query<SyncPullParams>,
 ) -> Result<Json<SyncPullResponse>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let local_version = params.local_version.unwrap_or(0);
 
     let created_items: Vec<Item> = sqlx::query_as(
@@ -105,8 +91,7 @@ pub async fn sync_pull(
 pub async fn sync_push(
     State(state): State<AppState>, auth: AuthUser, Json(req): Json<SyncPushRequest>,
 ) -> Result<Json<SyncPushResponse>, AppError> {
-    let user_internal = resolve_user_internal(&state, &auth.public_id).await?;
-    let _conflicts: Vec<SyncConflict> = Vec::new();
+    let user_internal = state.resolve_user_id(&auth.public_id).await?;
     let mut assigned_items = Vec::new();
     let mut assigned_spaces = Vec::new();
     let mut assigned_history = Vec::new();
@@ -126,7 +111,7 @@ pub async fn sync_push(
             .bind(&item.location).bind(item.location_id).bind(&item.category).bind(&item.tags)
             .bind(&item.barcode).bind(&item.photos).bind(&item.photo_uri).bind(&item.buy_date)
             .bind(&item.expiry).bind(&item.remark).bind(item.track_low_stock)
-            .bind(item.owner_id).bind(&item.created_at).bind(&item.updated_at)
+            .bind(user_internal).bind(&item.created_at).bind(&item.updated_at)
             .bind(version).bind(0i16)
             .execute(&state.db).await.map_err(AppError::Database)?;
 
@@ -155,7 +140,7 @@ pub async fn sync_push(
             )
             .bind(id).bind(&public_id).bind(&space.name).bind(&space.icon).bind(space.count)
             .bind(parent_internal).bind(space.depth).bind(space.sort_order).bind(&space.photo_uri)
-            .bind(space.owner_id).bind(&space.created_at).bind(&space.updated_at)
+            .bind(user_internal).bind(&space.created_at).bind(&space.updated_at)
             .bind(version).bind(0i16)
             .execute(&state.db).await.map_err(AppError::Database)?;
 
@@ -169,7 +154,7 @@ pub async fn sync_push(
 
     if let Some(history) = req.history {
         for record in history.created {
-            let item_internal = resolve_item_internal(&state, &record.item_public_id).await.ok();
+            let item_internal = state.resolve_item_id(&record.item_public_id).await.ok();
 
             if let Some(ii) = item_internal {
                 let existing: Option<(i64, String, i64)> = sqlx::query_as(
@@ -186,16 +171,21 @@ pub async fn sync_push(
                     });
                     continue;
                 }
+            } else {
+                tracing::warn!("sync_push: item not found for public_id={}, skipping history record", record.item_public_id);
+                continue;
             }
 
             let (id, public_id) = state.new_id();
             let version = state.next_version().await.map_err(AppError::Database)?;
 
+            let item_id = item_internal.unwrap();
+
             sqlx::query(
                 r#"INSERT INTO history (id, public_id, type, item_id, item_name, qty, from_location, to_location, reason, remark, time, version, is_deleted)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
             )
-            .bind(id).bind(&public_id).bind(&record.r#type).bind(item_internal.unwrap_or(0))
+            .bind(id).bind(&public_id).bind(&record.r#type).bind(item_id)
             .bind(&record.item_name).bind(record.qty).bind(&record.from_location).bind(&record.to_location)
             .bind(&record.reason).bind(&record.remark).bind(&record.time)
             .bind(version).bind(0i16)
@@ -255,7 +245,7 @@ pub async fn sync_push(
 
     Ok(Json(SyncPushResponse {
         success: true,
-        conflicts: _conflicts,
+        conflicts: Vec::new(),
         assigned_items,
         assigned_spaces,
         assigned_history,
@@ -265,8 +255,9 @@ pub async fn sync_push(
 }
 
 pub async fn sync_status(
-    State(state): State<AppState>,
+    State(state): State<AppState>, auth: AuthUser,
 ) -> Result<Json<SyncStatusResponse>, AppError> {
+    let _user_internal = state.resolve_user_id(&auth.public_id).await?;
     let row: (Option<String>, i32) = sqlx::query_as("SELECT last_sync_time, pending_changes FROM sync_status WHERE id = 1")
         .fetch_one(&state.db).await.map_err(AppError::Database)?;
 
