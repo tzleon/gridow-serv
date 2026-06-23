@@ -20,8 +20,10 @@ pub async fn upload_image(
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
     let _user_internal = state.resolve_user_id(&auth.public_id).await?;
 
-    let mut image_id = String::new();
-    let mut image_url = String::new();
+    let mut upload_type = String::new();
+    let mut requested_filename: Option<String> = None;
+    let mut content_type = String::new();
+    let mut file_data: Option<Vec<u8>> = None;
 
     while let Some(field) = multipart
         .next_field()
@@ -30,48 +32,66 @@ pub async fn upload_image(
     {
         let field_name = field.name().unwrap_or("").to_string();
 
-        if field_name == "file" {
-            let content_type = field
-                .content_type()
-                .unwrap_or("application/octet-stream")
-                .to_string();
-
-            if !is_allowed_content_type(&content_type) {
-                return Err(AppError::BadRequest(
-                    "仅支持 JPG/PNG/WEBP 格式".to_string(),
-                ));
+        match field_name.as_str() {
+            "type" => {
+                upload_type = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("读取类型失败: {}", e)))?
+                    .trim()
+                    .to_lowercase();
             }
+            "file" => {
+                requested_filename = field.file_name().map(|name| name.to_string());
+                content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
 
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| AppError::BadRequest(format!("读取文件失败: {}", e)))?;
+                if !is_allowed_content_type(&content_type) {
+                    return Err(AppError::BadRequest(
+                        "仅支持 JPG/PNG/WEBP 格式".to_string(),
+                    ));
+                }
 
-            if data.len() > MAX_FILE_SIZE {
-                return Err(AppError::PayloadTooLarge);
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("读取文件失败: {}", e)))?;
+
+                if data.len() > MAX_FILE_SIZE {
+                    return Err(AppError::PayloadTooLarge);
+                }
+
+                file_data = Some(data.to_vec());
             }
-
-            let (processed_data, output_ext) = process_image(&data, &content_type)?;
-
-            image_id = state.new_public_id();
-            let filename = format!("{}.{}", image_id, output_ext);
-            let filepath = std::path::Path::new(&state.upload_dir).join(&filename);
-
-            let mut file = tokio::fs::File::create(&filepath)
-                .await
-                .map_err(|e| AppError::Internal(format!("创建文件失败: {}", e)))?;
-
-            file.write_all(&processed_data)
-                .await
-                .map_err(|e| AppError::Internal(format!("写入文件失败: {}", e)))?;
-
-            image_url = format!("{}/v1/images/{}", state.base_url.trim_end_matches('/'), filename);
+            _ => {}
         }
     }
 
-    if image_id.is_empty() {
-        return Err(AppError::BadRequest("未提供文件".to_string()));
+    let file_data = file_data.ok_or_else(|| AppError::BadRequest("未提供文件".to_string()))?;
+    let (processed_data, output_ext) = process_image(&file_data, &content_type)?;
+    let image_id = requested_filename
+        .as_deref()
+        .filter(|_| upload_type == "avatar")
+        .and_then(extract_avatar_filename_stem)
+        .unwrap_or_else(|| state.new_public_id());
+    let filename = format!("{}.{}", image_id, output_ext);
+    let filepath = std::path::Path::new(&state.upload_dir).join(&filename);
+
+    if filepath.exists() {
+        return Err(AppError::BadRequest("文件名已存在，请重新上传".to_string()));
     }
+
+    let mut file = tokio::fs::File::create(&filepath)
+        .await
+        .map_err(|e| AppError::Internal(format!("创建文件失败: {}", e)))?;
+
+    file.write_all(&processed_data)
+        .await
+        .map_err(|e| AppError::Internal(format!("写入文件失败: {}", e)))?;
+
+    let image_url = format!("{}/v1/images/{}", state.base_url.trim_end_matches('/'), filename);
 
     Ok((
         StatusCode::CREATED,
@@ -116,6 +136,21 @@ fn content_type_to_ext(content_type: &str) -> String {
         "image/webp" => "webp".to_string(),
         _ => "bin".to_string(),
     }
+}
+
+fn extract_avatar_filename_stem(filename: &str) -> Option<String> {
+    let raw_name = std::path::Path::new(filename)
+        .file_stem()?
+        .to_str()?
+        .trim()
+        .to_lowercase();
+
+    let normalized = raw_name.replace('-', "");
+    is_uuid_hex(&normalized).then_some(normalized)
+}
+
+fn is_uuid_hex(value: &str) -> bool {
+    value.len() == 32 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 pub async fn get_image(
